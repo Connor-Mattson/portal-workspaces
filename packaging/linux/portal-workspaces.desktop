@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Portal Workspaces
+GenericName=Agentic Development Environment
+Comment=Terminal workspaces for all your projects and CLI agents
+Exec=portal-workspaces
+Icon=portal-workspaces
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+Keywords=terminal;agents;claude;codex;workspace;
+StartupWMClass=portal-workspaces
+StartupNotify=true

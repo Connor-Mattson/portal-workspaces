@@ -1,0 +1,31 @@
+[package]
+name = "pw-app"
+description = "Portal Workspaces: an agentic development environment of terminal workspaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "portal-workspaces"
+path = "src/main.rs"
+
+[dependencies]
+pw-model.workspace = true
+pw-term.workspace = true
+iced = { workspace = true, features = ["wgpu", "tiny-skia", "canvas", "tokio", "advanced", "svg", "x11", "wayland", "thread-pool", "crisp", "web-colors"] }
+rfd.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
+
+# macOS app bundle: `cargo install cargo-bundle && cargo bundle --release -p pw-app`
+[package.metadata.bundle]
+name = "Portal Workspaces"
+identifier = "dev.portal.workspaces"
+icon = ["../../assets/icons/portal-workspaces.png"]
+category = "public.app-category.developer-tools"
+short_description = "Terminal workspaces for agentic development"
+osx_minimum_system_version = "11.0"
