@@ -203,6 +203,9 @@ Sampling stops while the section is closed. In the collapsed drawer the rings sh
 on macOS. Set `PORTAL_WORKSPACES_STATE=/path/to/file.json` to use another file (handy for trying things out).
 If the file can't be read, it is moved aside as `state.json.bak-<time>` and the app starts empty.
 
+Logs (and the backtrace of any crash) go to `logs/portal-workspaces.log` in the same folder, as well as to stderr.
+The file is capped at 2 MB, and the one before it is kept as `portal-workspaces.log.1`. `RUST_LOG` sets the level.
+
 ## Performance
 
 - **Idle:** no timers except a 10-second cwd check, the 2-minute usage check and the 5-second system sample

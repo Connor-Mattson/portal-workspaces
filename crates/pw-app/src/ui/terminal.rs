@@ -124,10 +124,11 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
     ) -> Option<canvas::Action<Message>> {
         match event {
             // Layout changes always come with a redraw, so this is where size changes are noticed.
+            // During a divider drag the app defers them, and the old grid is drawn until it's let go.
             Event::Window(window::Event::RedrawRequested(_)) => {
                 let session = self.rt.session.as_ref()?;
                 let grid = self.grid_for(bounds);
-                (session.size() != grid)
+                (session.target_size() != grid)
                     .then(|| canvas::Action::publish(Message::Terminal(self.pane, TermMsg::Resize(grid))))
             }
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {

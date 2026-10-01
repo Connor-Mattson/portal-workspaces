@@ -99,6 +99,37 @@ fn resize_reaches_the_pty() {
 }
 
 #[test]
+fn deferred_resizes_reach_the_pty_once_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, rx) = spawn(dir.path(), "/bin/sh", &[]);
+    session.write(&b"n=0; trap 'n=$((n+1))' WINCH; echo ready\r"[..]);
+    wait_for(&session, &rx, "trap", |t| t.contains("ready"));
+    // A drag: many sizes, none of them taken yet.
+    for cols in 81..=120 {
+        session.defer_resize(GridSize { cols, rows: 30, ..SIZE });
+    }
+    assert_eq!(session.size(), SIZE);
+    assert_eq!(session.target_size(), GridSize { cols: 120, rows: 30, ..SIZE });
+    assert!(session.settle());
+    assert!(!session.settle());
+    assert_eq!(session.size().cols, 120);
+    session.write(&b"echo winches=$n; stty size\r"[..]);
+    wait_for(&session, &rx, "stty size", |t| t.contains("30 120"));
+    // Forty steps of the drag, one resize for the program.
+    assert!(session.snapshot(true).text().contains("winches=1"));
+
+    // Dragged back to where it started: nothing to settle.
+    session.defer_resize(GridSize { cols: 90, ..session.size() });
+    session.defer_resize(session.size());
+    assert!(!session.settle());
+    // A resize now drops one that was deferred.
+    session.defer_resize(GridSize { cols: 90, ..session.size() });
+    session.resize(GridSize { cols: 100, ..session.size() });
+    assert!(!session.settle());
+    assert_eq!(session.size().cols, 100);
+}
+
+#[test]
 fn select_all_copies_the_history_and_screen() {
     let dir = tempfile::tempdir().unwrap();
     let (session, rx) = spawn(dir.path(), "/bin/sh", &["-c", "printf 'alpha\\nbeta'; sleep 5"]);
@@ -123,6 +154,39 @@ fn only_a_selection_on_screen_is_taken() {
     assert_eq!(session.take_visible_selection(), None);
     session.scroll_page(false);
     assert_eq!(session.take_visible_selection().as_deref(), Some("78\n"));
+}
+
+fn char_key(c: char) -> pw_term::KeyInput {
+    pw_term::KeyInput { key: pw_term::Key::Char(c), mods: pw_term::Mods::default(), text: Some(c.to_string()) }
+}
+
+#[test]
+fn typing_redraws_at_once_only_when_it_moves_the_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let (session, rx) = spawn(dir.path(), "/bin/sh", &["-c", "seq 1 100; cat >/dev/null"]);
+    wait_for(&session, &rx, "output", |t| t.contains("100"));
+
+    // At the live output with nothing selected, nothing changes until the echo arrives, so the
+    // keystroke itself mustn't cost a redraw.
+    assert!(!session.send_key(&char_key('a')));
+    assert!(!session.paste("pasted"));
+
+    // Scrolled back: typing jumps to the bottom at once.
+    session.scroll_page(true);
+    assert!(session.snapshot(true).display_offset > 0);
+    assert!(session.send_key(&char_key('b')));
+    assert_eq!(session.snapshot(true).display_offset, 0);
+    session.scroll_page(true);
+    assert!(session.paste("x"));
+    assert_eq!(session.snapshot(true).display_offset, 0);
+
+    // A selection is dropped at once.
+    session.start_selection(pw_term::SelectionKind::Line, pw_term::GridPoint { row: 0, col: 0 }, false);
+    assert!(session.send_key(&char_key('c')));
+    assert_eq!(session.selection_text(), None);
+    session.select_all();
+    assert!(session.paste("y"));
+    assert_eq!(session.selection_text(), None);
 }
 
 /// Collects events (other than wakeups) for up to `duration`, or until `last` arrives.

@@ -18,6 +18,12 @@ and all of them should be visible at a glance in the drawer. None of the provide
   backs off after failures (2 → 4 → 8 → 15 min) and honors `Retry-After`. It runs no UI timer: readings
   arrive through an inbox subscription, like terminal events. Readings are not persisted, so the state file
   isn't rewritten every 2 minutes.
+- **No poll can hold up another, or hang.** Each due profile is polled on its own thread, which reports back to
+  the monitor, so a slow one only delays itself. A program the monitor runs (a vendor CLI, or macOS's
+  `security` for the Keychain) gets a bounded wait (`pw_usage::child`): it starts in its own process group,
+  which is killed as a whole if it outlives the timeout (30 s for a CLI, 60 s for the Keychain, which may be
+  waiting for you to allow access). Its output is read on a thread nobody joins, since a process it left in the
+  background can hold its stdout open forever. The monitor stops waiting 250 ms after the program exits.
 - **Profiles** (`UsageProfile`) are persisted in `state.json` (schema 2). The optional *instructions* are
   whatever the user already has: an alias line, `VAR=…` assignments or a folder. `PollEnv::parse` turns them
   into the CLI's data directory plus environment. Nothing in it is executed.

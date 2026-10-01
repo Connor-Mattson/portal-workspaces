@@ -87,7 +87,7 @@ pub(crate) fn load_credentials(env: &PollEnv) -> Result<Credentials, Failure> {
     let file = env.dir.join(".credentials.json");
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => Some(text),
-        Err(_) => keychain_credentials(env),
+        Err(_) => keychain_credentials(env).map_err(Failure::Unavailable)?,
     };
     text.as_deref().and_then(parse_credentials).ok_or_else(|| {
         Failure::NotFound(format!(
@@ -99,7 +99,7 @@ pub(crate) fn load_credentials(env: &PollEnv) -> Result<Credentials, Failure> {
 }
 
 #[cfg(target_os = "macos")]
-fn keychain_credentials(env: &PollEnv) -> Option<String> {
+fn keychain_credentials(env: &PollEnv) -> Result<Option<String>, String> {
     use sha2::{Digest, Sha256};
     const SERVICE: &str = "Claude Code-credentials";
     // With CLAUDE_CONFIG_DIR set, Claude Code suffixes the item with a hash of the directory.
@@ -108,12 +108,17 @@ fn keychain_credentials(env: &PollEnv) -> Option<String> {
         let hex: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
         format!("{SERVICE}-{hex}")
     });
-    custom.and_then(|s| crate::secrets::keychain(&s, None)).or_else(|| crate::secrets::keychain(SERVICE, None))
+    if let Some(custom) = custom
+        && let Some(found) = crate::secrets::keychain(&custom, None)?
+    {
+        return Ok(Some(found));
+    }
+    crate::secrets::keychain(SERVICE, None)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn keychain_credentials(_env: &PollEnv) -> Option<String> {
-    None
+fn keychain_credentials(_env: &PollEnv) -> Result<Option<String>, String> {
+    Ok(None)
 }
 
 pub(crate) fn parse_credentials(text: &str) -> Option<Credentials> {

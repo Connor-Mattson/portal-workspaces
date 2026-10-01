@@ -5,13 +5,13 @@
 //! command that sends a prompt (`claude -p …`, `agy -p …`, `codex exec …`), or a script that
 //! starts a thread or turn.
 
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use pw_model::PollEnv;
+
+use crate::child;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCmd {
@@ -66,7 +66,8 @@ impl VendorCmd {
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Runs `cmd` with the profile's environment and returns its stdout.
+/// Runs `cmd` with the profile's environment and returns its stdout. Never waits longer than
+/// [`TIMEOUT`] (see [`crate::child`]).
 pub fn run(cmd: VendorCmd, env: &PollEnv) -> Result<String, String> {
     let program =
         which(cmd.program()).ok_or_else(|| format!("`{}` isn't installed (or not on PATH).", cmd.program()))?;
@@ -77,51 +78,15 @@ pub fn run(cmd: VendorCmd, env: &PollEnv) -> Result<String, String> {
     if env.dir.is_dir() {
         command.current_dir(&env.dir);
     }
-    let mut child = command
-        .args(cmd.args())
-        .envs(env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .stdin(if script.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|err| format!("Couldn't start {}: {err}", program.display()))?;
-    let mut stdin = child.stdin.take();
-    if let (Some(pipe), Some((input, _))) = (stdin.as_mut(), script) {
-        let _ = pipe.write_all(input.as_bytes());
+    command.args(cmd.args()).envs(env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    let done = |line: &str| script.is_some_and(|(_, id)| answers(line, id));
+    match child::run(command, script.map(|(input, _)| input), done, TIMEOUT) {
+        Ok(finished) if finished.status.success() => Ok(finished.stdout),
+        Ok(finished) => Err(format!("`{}` exited with {}.", cmd.program(), finished.status)),
+        Err(child::Error::Spawn(err)) => Err(format!("Couldn't start {}: {err}", program.display())),
+        Err(child::Error::Wait(err)) => Err(err.to_string()),
+        Err(child::Error::TimedOut) => Err(format!("`{}` took too long.", cmd.program())),
     }
-    let stdout = child.stdout.take().expect("piped");
-    let (answered, on_answer) = mpsc::channel();
-    // Read on a helper thread so a chatty child can't fill the pipe and stall while we wait.
-    let reader = std::thread::spawn(move || {
-        let mut out = String::new();
-        for line in BufReader::new(stdout.take(1 << 20)).lines().map_while(Result::ok) {
-            if script.is_some_and(|(_, id)| answers(&line, id)) {
-                let _ = answered.send(());
-            }
-            out.push_str(&line);
-            out.push('\n');
-        }
-        out
-    });
-    let started = Instant::now();
-    let status = loop {
-        if on_answer.try_recv().is_ok() {
-            stdin = None; // EOF: a scripted server exits once it has answered.
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(50)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("`{}` took too long.", cmd.program()));
-            }
-            Err(err) => return Err(err.to_string()),
-        }
-    };
-    drop(stdin);
-    let out = reader.join().unwrap_or_default();
-    if status.success() { Ok(out) } else { Err(format!("`{}` exited with {status}.", cmd.program())) }
 }
 
 /// Whether a JSON-RPC line is the response to request `id`.

@@ -1,22 +1,31 @@
 //! Reading (never writing) credentials the provider CLIs keep in the OS keyring.
 
 /// A generic-password item from the macOS login Keychain, via `/usr/bin/security`. The first
-/// read asks the user to allow access.
+/// read asks the user to allow access, so it waits at most [`KEYCHAIN_TIMEOUT`] for an answer.
 #[cfg(target_os = "macos")]
-pub fn keychain(service: &str, account: Option<&str>) -> Option<String> {
-    let mut args = vec!["find-generic-password", "-s", service, "-w"];
+pub fn keychain(service: &str, account: Option<&str>) -> Result<Option<String>, String> {
+    let mut command = std::process::Command::new("/usr/bin/security");
+    command.args(["find-generic-password", "-s", service, "-w"]);
     if let Some(account) = account {
-        args.extend(["-a", account]);
+        command.args(["-a", account]);
     }
-    let out = std::process::Command::new("/usr/bin/security")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let secret = String::from_utf8(out.stdout).ok()?.trim().to_owned();
-    (out.status.success() && !secret.is_empty()).then_some(secret)
+    match crate::child::run(command, None, |_| false, KEYCHAIN_TIMEOUT) {
+        Ok(out) => {
+            let secret = out.stdout.trim().to_owned();
+            Ok((out.status.success() && !secret.is_empty()).then_some(secret))
+        }
+        Err(crate::child::Error::TimedOut) => {
+            Err("The Keychain didn't answer. Allow Portal Workspaces access when it asks, then refresh.".into())
+        }
+        Err(crate::child::Error::Spawn(err) | crate::child::Error::Wait(err)) => {
+            Err(format!("Couldn't read the Keychain: {err}"))
+        }
+    }
 }
+
+/// How long a Keychain read may wait, including for the user to answer its access prompt.
+#[cfg(target_os = "macos")]
+const KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The Secret Service item (GNOME Keyring, KWallet) with exactly these attributes.
 #[cfg(target_os = "linux")]

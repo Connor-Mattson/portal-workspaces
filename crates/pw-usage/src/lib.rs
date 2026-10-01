@@ -9,6 +9,7 @@
 //! Like `pw-term`, this crate has no GUI types: the app gets plain [`Update`]s through a callback.
 
 mod antigravity;
+mod child;
 mod claude;
 mod codex;
 mod discover;

@@ -19,6 +19,9 @@
 //!   `ctrl+backslash`).
 //! - Terminal menu: `menu <x> <y>` (opens the right-click menu of the terminal that has the keys, at a point in
 //!   the main window), `menu copy|paste|select-all|close`.
+//! - `divider <ratio>`: drags the active grid's first divider to `ratio` (0 to 1), as a mouse would;
+//!   `release` lets go of it.
+//! - `panic`: panics on the UI thread, to check the crash report in the log file.
 //!
 //! A script with a step it doesn't know quits right away, with an error in the log.
 
@@ -111,6 +114,9 @@ pub enum DevMsg {
     Open(PathBuf),
     /// Opens the right-click menu of the terminal that has the keys, at a point in the main window.
     Menu(Point),
+    /// Moves the active grid's first divider, as a drag does.
+    Divider(f32),
+    Panic,
 }
 
 /// A screenshot waiting for the next drawn frame. iced captures by re-rendering the last frame the window
@@ -184,6 +190,16 @@ impl App {
                 Task::none()
             }
             DevMsg::Open(path) => self.open_file(&path, false, true),
+            DevMsg::Panic => panic!("the dev script asked for a panic"),
+            DevMsg::Divider(ratio) => {
+                let split = self.active_view().and_then(|ws| ws.grid.as_ref()?.layout().splits().next().copied());
+                match split {
+                    Some(split) => {
+                        self.update(Message::PaneResized(iced::widget::pane_grid::ResizeEvent { split, ratio }))
+                    }
+                    None => Task::none(),
+                }
+            }
             DevMsg::Menu(at) => {
                 if let Some(pane) = self.key_pane() {
                     let can_copy =
@@ -250,6 +266,9 @@ fn parse(script: &str) -> Result<Vec<Step>, String> {
                 "term" if !arg.is_empty() => send(Message::Dev(DevMsg::Term(unescape(arg)))),
                 "key" => key(arg).map(|(k, m)| Step::Send(vec![Message::Dev(DevMsg::Key(k, m))])).ok_or_else(err),
                 "escape" => editor(EditorMsg::Escape),
+                "panic" => send(Message::Dev(DevMsg::Panic)),
+                "release" => send(Message::DividerReleased),
+                "divider" => arg.parse().map(|r| Step::Send(vec![Message::Dev(DevMsg::Divider(r))])).map_err(|_| err()),
                 "menu" => match arg {
                     "copy" => send(Message::TermMenu(MenuMsg::Copy)),
                     "paste" => send(Message::TermMenu(MenuMsg::Paste)),

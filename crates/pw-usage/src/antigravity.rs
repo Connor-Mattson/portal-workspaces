@@ -132,7 +132,7 @@ fn keyring_item() -> Result<Option<String>, Failure> {
 
 #[cfg(target_os = "macos")]
 fn keyring_item() -> Result<Option<String>, Failure> {
-    Ok(crate::secrets::keychain(KEYRING_SERVICE, Some(KEYRING_USER)))
+    crate::secrets::keychain(KEYRING_SERVICE, Some(KEYRING_USER)).map_err(Failure::Unavailable)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

@@ -64,6 +64,8 @@ impl App {
                 if self.focused_window == Some(id) {
                     self.focused_window = None;
                 }
+                // In case the button was let go where we didn't hear it.
+                self.settle_terminals();
             }
             WindowMsg::Resized(id, size) => {
                 let geometry = Some(WindowGeometry { width: size.width, height: size.height });

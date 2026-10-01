@@ -133,6 +133,8 @@ pub struct Session {
     shared: Arc<Shared>,
     pid: u32,
     size: GridSize,
+    /// A size waiting for [`Session::settle`].
+    deferred: Option<GridSize>,
 }
 
 impl Session {
@@ -169,15 +171,21 @@ impl Session {
         // The IO thread ends on its own when the shell exits or we send Shutdown.
         drop(event_loop.spawn());
 
-        Ok(Self { term, notifier: Notifier(sender), shared, pid, size })
+        Ok(Self { term, notifier: Notifier(sender), shared, pid, size, deferred: None })
     }
 
     pub fn pid(&self) -> u32 {
         self.pid
     }
 
+    /// The size the grid and the program have now.
     pub fn size(&self) -> GridSize {
         self.size
+    }
+
+    /// The size it's going to have: a deferred one, or the current one.
+    pub fn target_size(&self) -> GridSize {
+        self.deferred.unwrap_or(self.size)
     }
 
     /// The shell's current working directory, if the OS lets us see it.
@@ -185,7 +193,10 @@ impl Session {
         crate::cwd::current_dir(self.pid)
     }
 
+    /// Reflows the grid and tells the program (`SIGWINCH`), which then typically redraws all of
+    /// its screen.
     pub fn resize(&mut self, size: GridSize) {
+        self.deferred = None;
         if size == self.size {
             return;
         }
@@ -193,6 +204,20 @@ impl Session {
         *self.shared.window_size.lock().expect("window size lock") = size.window_size();
         self.term.lock().resize(size);
         self.notifier.on_resize(size.window_size());
+    }
+
+    /// Keeps `size` for [`Session::settle`] instead of resizing now. While a size is still moving
+    /// (a divider being dragged), resizing at every step would reflow the history and make the
+    /// program redraw its whole screen each time; the grid keeps its size meanwhile.
+    pub fn defer_resize(&mut self, size: GridSize) {
+        self.deferred = (size != self.size).then_some(size);
+    }
+
+    /// Takes the deferred size, if there is one. Returns whether the size changed.
+    pub fn settle(&mut self) -> bool {
+        let Some(size) = self.deferred.take() else { return false };
+        self.resize(size);
+        true
     }
 
     /// Sends raw bytes to the program.
@@ -203,26 +228,35 @@ impl Session {
         }
     }
 
-    /// Sends a key press. Returns whether it produced any bytes.
+    /// Sends a key press. Returns whether the view changed (see [`Session::paste`]), so the
+    /// caller redraws now rather than when the program's echo arrives.
     pub fn send_key(&self, key: &KeyInput) -> bool {
         let mode = self.mode();
         let Some(bytes) = input::encode(key, mode) else { return false };
-        self.follow_output();
+        let changed = self.follow_output();
         self.write(bytes);
-        true
+        changed
     }
 
-    pub fn paste(&self, text: &str) {
+    /// Sends pasted text. Returns whether the view changed: it was scrolled back or had a
+    /// selection. Otherwise there's nothing new to draw until the program answers.
+    pub fn paste(&self, text: &str) -> bool {
         let bytes = input::encode_paste(text, self.mode());
-        self.follow_output();
+        let changed = self.follow_output();
         self.write(bytes);
+        changed
     }
 
     /// Scrolls back to the live output and drops any selection, as terminals do on typing.
-    fn follow_output(&self) {
+    /// Returns whether either changed anything.
+    fn follow_output(&self) -> bool {
         let mut term = self.term.lock();
-        term.selection = None;
-        term.scroll_display(Scroll::Bottom);
+        let selected = term.selection.take().is_some();
+        let scrolled = term.grid().display_offset() != 0;
+        if scrolled {
+            term.scroll_display(Scroll::Bottom);
+        }
+        selected || scrolled
     }
 
     fn mode(&self) -> TermMode {

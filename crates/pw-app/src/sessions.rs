@@ -135,6 +135,15 @@ impl Sessions {
             rt.cache.clear();
         }
     }
+
+    /// Applies every deferred resize (see `Session::defer_resize`), redrawing those terminals.
+    pub fn settle_all(&mut self) {
+        for rt in self.panes.values_mut() {
+            if rt.session.as_mut().is_some_and(|s| s.settle()) {
+                rt.cache.clear();
+            }
+        }
+    }
 }
 
 /// The user's home directory, resolved once. Views tildify paths on every rebuild, so this must not touch the disk:

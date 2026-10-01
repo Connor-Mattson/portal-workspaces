@@ -1,9 +1,11 @@
 //! The usage daemon: one thread that polls every profile on a schedule.
 //!
-//! The thread sleeps until the next profile is due (or a command arrives), polls the due profiles
-//! in parallel, and hands each result to a callback. Dropping the [`Monitor`] stops it.
+//! The thread sleeps until the next profile is due (or a command arrives), starts each due poll on
+//! its own thread, and hands each result to a callback. A slow or stuck poll holds up only its own
+//! profile: the others keep their schedule. Dropping the [`Monitor`] stops it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -33,6 +35,14 @@ enum Command {
     SetProfiles(Vec<UsageProfile>),
     Refresh(Option<ProfileId>),
     Renew(ProfileId),
+    /// A poll thread finished; `poll` says which one, so a slot replaced meanwhile ignores it.
+    Polled {
+        profile: ProfileId,
+        poll: u64,
+        state: ProviderState,
+        result: Result<Report, Failure>,
+    },
+    Stop,
 }
 
 pub struct Monitor {
@@ -43,9 +53,10 @@ impl Monitor {
     /// Starts the daemon. `on_update` runs on the monitor thread.
     pub fn spawn(poller: impl Poller, on_update: impl Fn(Update) + Send + Sync + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
+        let polled = tx.clone();
         thread::Builder::new()
             .name("usage-monitor".into())
-            .spawn(move || run(&poller, &rx, &on_update))
+            .spawn(move || run(Arc::new(poller), &rx, &polled, &on_update))
             .expect("spawn usage monitor");
         Self { tx }
     }
@@ -67,18 +78,50 @@ impl Monitor {
     }
 }
 
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        // Poll threads hold senders too, so the channel alone wouldn't disconnect.
+        let _ = self.tx.send(Command::Stop);
+    }
+}
+
 struct Slot {
     profile: UsageProfile,
-    state: ProviderState,
+    /// `None` while a poll has it.
+    state: Option<ProviderState>,
     due: Instant,
     last_poll: Option<Instant>,
     failures: u32,
+    /// The poll in flight, if any.
+    polling: Option<u64>,
+    /// A renewal asked for while a poll was in flight, applied when it returns.
+    renew: bool,
 }
 
-fn run(poller: &impl Poller, rx: &mpsc::Receiver<Command>, on_update: &(impl Fn(Update) + Sync)) {
+impl Slot {
+    fn new(profile: UsageProfile, due: Instant) -> Self {
+        Self {
+            profile,
+            state: Some(ProviderState::default()),
+            due,
+            last_poll: None,
+            failures: 0,
+            polling: None,
+            renew: false,
+        }
+    }
+}
+
+fn run<P: Poller>(
+    poller: Arc<P>,
+    rx: &mpsc::Receiver<Command>,
+    polled: &mpsc::Sender<Command>,
+    on_update: &impl Fn(Update),
+) {
     let mut slots: Vec<Slot> = Vec::new();
+    let mut polls = 0u64;
     loop {
-        let next_due = slots.iter().map(|s| s.due).min();
+        let next_due = slots.iter().filter(|s| s.polling.is_none()).map(|s| s.due).min();
         let command = match next_due {
             Some(due) => rx.recv_timeout(due.saturating_duration_since(Instant::now())),
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
@@ -95,34 +138,54 @@ fn run(poller: &impl Poller, rx: &mpsc::Receiver<Command>, on_update: &(impl Fn(
             }
             Ok(Command::Renew(target)) => {
                 if let Some(slot) = slots.iter_mut().find(|s| s.profile.id == target) {
-                    slot.state.allow_renewal();
+                    match slot.state.as_mut() {
+                        Some(state) => state.allow_renewal(),
+                        None => slot.renew = true,
+                    }
                     slot.due = Instant::now();
                 }
             }
+            Ok(Command::Polled { profile, poll, mut state, result }) => {
+                let Some(slot) = slots.iter_mut().find(|s| s.profile.id == profile && s.polling == Some(poll)) else {
+                    continue; // Removed or reconfigured while it ran.
+                };
+                let finished = Instant::now();
+                slot.failures = if result.is_ok() { 0 } else { slot.failures + 1 };
+                let delay = next_delay(&result, slot.failures);
+                slot.due = finished + delay;
+                slot.last_poll = Some(finished);
+                if std::mem::take(&mut slot.renew) {
+                    state.allow_renewal();
+                    slot.due = finished;
+                }
+                slot.state = Some(state);
+                slot.polling = None;
+                on_update(Update { profile, result, next_poll: SystemTime::now() + delay });
+            }
+            Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return,
         }
 
+        // Profiles are independent (different hosts, files and CLIs), so each poll gets its own
+        // thread and one slow one never holds up the rest.
         let now = Instant::now();
-        let mut due: Vec<&mut Slot> = slots.iter_mut().filter(|s| s.due <= now).collect();
-        if due.is_empty() {
-            continue;
-        }
-        // Profiles are independent (different hosts, files and CLIs), so one slow one never
-        // holds up the rest.
-        thread::scope(|scope| {
-            for slot in due.iter_mut() {
-                scope.spawn(move || {
-                    let result = poller.poll(&slot.profile, &mut slot.state);
-                    let finished = Instant::now();
-                    slot.failures = if result.is_ok() { 0 } else { slot.failures + 1 };
-                    let delay = next_delay(&result, slot.failures);
-                    slot.due = finished + delay;
-                    slot.last_poll = Some(finished);
-                    on_update(Update { profile: slot.profile.id, result, next_poll: SystemTime::now() + delay });
-                });
+        for slot in slots.iter_mut().filter(|s| s.polling.is_none() && s.due <= now) {
+            let Some(mut state) = slot.state.take() else { continue };
+            polls += 1;
+            let poll = polls;
+            slot.polling = Some(poll);
+            let (poller, polled, profile) = (poller.clone(), polled.clone(), slot.profile.clone());
+            let spawned = thread::Builder::new().name("usage-poll".into()).spawn(move || {
+                let result = poller.poll(&profile, &mut state);
+                let _ = polled.send(Command::Polled { profile: profile.id, poll, state, result });
+            });
+            if let Err(err) = spawned {
+                tracing::warn!(%err, "couldn't start a usage poll");
+                slot.polling = None;
+                slot.state = Some(ProviderState::default());
+                slot.due = now + INTERVAL;
             }
-        });
+        }
     }
 }
 
@@ -138,7 +201,7 @@ fn set_profiles(slots: &mut Vec<Slot>, profiles: Vec<UsageProfile>) {
                 slot.profile = profile;
                 slots.push(slot);
             }
-            _ => slots.push(Slot { profile, state: ProviderState::default(), due: now, last_poll: None, failures: 0 }),
+            _ => slots.push(Slot::new(profile, now)),
         }
     }
 }
@@ -238,6 +301,45 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a.id);
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
 
+        drop(monitor);
+    }
+
+    /// Hangs on one profile until released; answers the others at once.
+    struct Stuck {
+        stuck: ProfileId,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Poller for Stuck {
+        fn poll(&self, profile: &UsageProfile, _: &mut ProviderState) -> Result<Report, Failure> {
+            if profile.id == self.stuck {
+                let _ = self.release.lock().unwrap().recv();
+            }
+            Ok(Report::new(Vec::new(), SystemTime::now(), true))
+        }
+    }
+
+    #[test]
+    fn a_stuck_profile_does_not_hold_up_the_others() {
+        let a = UsageProfile::new("A", Provider::Codex, "");
+        let b = UsageProfile::new("B", Provider::Claude, "");
+        let (release, gate) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let monitor = Monitor::spawn(Stuck { stuck: a.id, release: Mutex::new(gate) }, move |u: Update| {
+            let _ = tx.send(u.profile);
+        });
+        monitor.set_profiles(vec![a.clone(), b.clone()]);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), b.id);
+        // Before polls had their own threads, nothing ran again until A returned.
+        monitor.renew(b.id);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), b.id);
+        // A renewal asked for while A is polling waits for that poll, then runs.
+        monitor.renew(a.id);
+        release.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a.id);
+        release.send(()).unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a.id);
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
         drop(monitor);
     }
 }

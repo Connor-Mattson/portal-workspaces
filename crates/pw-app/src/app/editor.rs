@@ -661,6 +661,7 @@ impl App {
                 self.touch();
             }
             EditorMsg::RegionResized(pane_grid::ResizeEvent { split, ratio }) => {
+                self.dragging_divider = true;
                 self.with_editor(|_, e| e.resize_region(split, ratio));
                 self.sessions.clear_all_caches();
                 self.touch();

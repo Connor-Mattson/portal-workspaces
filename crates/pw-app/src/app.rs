@@ -63,6 +63,8 @@ pub enum Message {
     PaneClicked(pane_grid::Pane),
     PaneDragged(pane_grid::DragEvent),
     PaneResized(pane_grid::ResizeEvent),
+    /// The mouse button let go of a divider (see `App::dragging_divider`).
+    DividerReleased,
     SplitPane(PaneId, Axis),
     ClosePane(PaneId),
     MaximizePane(PaneId),
@@ -132,6 +134,9 @@ pub struct App {
     pub(crate) last_click: Option<(Clicked, Instant)>,
     /// The scripted UI driver's pending screenshot.
     pub(crate) dev: Dev,
+    /// A divider (between panes, groups, or the editor's regions) is being dragged. Terminals then
+    /// defer resizing until it's let go, so a program redraws once rather than at every step.
+    pub(crate) dragging_divider: bool,
     dirty: bool,
     saver: Saver,
 }
@@ -158,6 +163,7 @@ impl App {
             fs: FsHub::default(),
             last_click: None,
             dev: Dev::default(),
+            dragging_divider: false,
             dirty: false,
             saver,
         };
@@ -226,6 +232,15 @@ impl App {
         // timers but the cwd poll.
         if self.dirty {
             subs.push(time::every(SAVE_DEBOUNCE).map(|_| Message::SaveTick));
+        }
+        // A divider drag ends when the button is let go, wherever that is.
+        if self.dragging_divider {
+            subs.push(event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left)) => {
+                    Some(Message::DividerReleased)
+                }
+                _ => None,
+            }));
         }
         Subscription::batch(subs)
     }
@@ -314,6 +329,13 @@ impl App {
 
     pub(crate) fn touch(&mut self) {
         self.dirty = true;
+    }
+
+    /// Ends a divider drag: terminals take the sizes they deferred.
+    pub(crate) fn settle_terminals(&mut self) {
+        if std::mem::take(&mut self.dragging_divider) {
+            self.sessions.settle_all();
+        }
     }
 
     /// Samples the system only while the profile is on screen: the drawer's section is open, or
@@ -537,9 +559,11 @@ impl App {
             Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
                 if let Some(grid) = self.active_mut().and_then(|ws| ws.grid.as_mut()) {
                     grid.resize(split, ratio);
+                    self.dragging_divider = true;
                     self.touch();
                 }
             }
+            Message::DividerReleased => self.settle_terminals(),
             Message::SplitPane(pane, axis) => self.split(Some(pane), axis),
             Message::ClosePane(pane) => return self.close_pane(pane),
             Message::MaximizePane(pane) => {
@@ -569,10 +593,10 @@ impl App {
             }
             Message::Modal(msg) => return self.on_modal(msg),
             Message::Paste(Some(text)) => {
-                if let Some(session) =
-                    self.key_pane().and_then(|p| self.sessions.get(p)).and_then(|rt| rt.session.as_ref())
+                if let Some(rt) = self.key_pane().and_then(|p| self.sessions.get(p))
+                    && rt.session.as_ref().is_some_and(|session| session.paste(&text))
                 {
-                    session.paste(&text);
+                    rt.cache.clear();
                 }
             }
             Message::Paste(None) => {}
@@ -689,6 +713,7 @@ impl App {
         let report = |mods: pw_term::Mods| session.wants_mouse() && !mods.shift;
         let mut task = Task::none();
         match msg {
+            TermMsg::Resize(size) if self.dragging_divider => session.defer_resize(size),
             TermMsg::Resize(size) => session.resize(size),
             TermMsg::MouseDown { point, right_half, button, clicks, mods, menu_at } => {
                 if report(mods) {

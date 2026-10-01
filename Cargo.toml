@@ -47,7 +47,8 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 lto = "thin"
 codegen-units = 1
-strip = true
+# Keep the symbol table so a panic's backtrace in the log names functions (see logging.rs).
+strip = "debuginfo"
 
 [profile.dev.package."*"]
 opt-level = 2

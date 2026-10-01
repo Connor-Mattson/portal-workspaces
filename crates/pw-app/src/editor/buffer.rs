@@ -513,4 +513,45 @@ mod tests {
         assert_eq!(b.text(), a.text());
         assert_eq!(b.cursor().position, Position { line: 3, column: 2 });
     }
+
+    #[test]
+    fn undo_and_redo_round_trip_through_the_view() {
+        with_buffer("a.rs", "fn main() {\n}\n", |b| {
+            let mut states = vec![b.view.text()];
+            let mut step = |b: &mut Buffer, f: &dyn Fn(&mut Buffer)| {
+                b.doc.history.seal();
+                f(b);
+                states.push(b.view.text());
+            };
+            step(b, &|b| {
+                caret(b, 0, 11);
+                b.newline();
+            });
+            step(b, &|b| "let x = (1);".chars().for_each(|c| b.type_char(c)));
+            step(b, &|b| b.perform(Action::Edit(Edit::Paste(Arc::new("\n// pasted\n// é日本\n".into())))));
+            step(b, &|b| (0..4).for_each(|_| b.backspace()));
+            step(b, &|b| b.toggle_comment());
+            step(b, &|b| b.set_text("reloaded\nfrom disk\n"));
+            step(b, &|b| "ok".chars().for_each(|c| b.type_char(c)));
+            // Typing makes a step per word, so undo passes through every state and more.
+            let mut undone = vec![b.view.text()];
+            loop {
+                b.undo();
+                if b.view.text() == *undone.last().unwrap() {
+                    break;
+                }
+                undone.push(b.view.text());
+            }
+            let mut wanted = states.iter().rev().peekable();
+            for text in &undone {
+                wanted.next_if(|want| *want == text);
+            }
+            assert!(wanted.peek().is_none(), "undo skipped {:?}", wanted.peek());
+            assert_eq!(undone.last(), states.first());
+            for want in undone.iter().rev().skip(1) {
+                b.redo();
+                assert_eq!(&b.view.text(), want);
+            }
+        });
+    }
 }

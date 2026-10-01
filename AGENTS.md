@@ -17,8 +17,10 @@ to it (see ADR 0012). Read `README.md` for the user-facing picture.
     asleep with no timeout unless a terminal is busy; it wakes the UI only when one goes quiet). The system monitor is paused, with no timeout at
     all, while its rings aren't on screen. File watching is event-driven (ADR 0009); the caret blink,
     scrollbar fade and highlighting catching up on a long file (ADR 0008) are redraw requests, not timers.
-  - A terminal's `canvas::Cache` is cleared only when that terminal changed. Other canvases keep their drawing
-    in `ui::Drawn`, redrawn only when what they draw from changes.
+  - A terminal's `canvas::Cache` is cleared only when that terminal changed. A keystroke clears it only when it
+    moved the view (scrolled back, a selection); otherwise the echo does. Other canvases keep their drawing in
+    `ui::Drawn`, redrawn only when what they draw from changes.
+  - Terminals don't resize while a divider is dragged; they take their size when it's let go (ADR 0016).
   - Views do no I/O: they're rebuilt after every message. Look things up once (like `sessions::home_dir`).
   - Hidden workspaces never draw, and neither does a workspace's hidden mode (Agents or Editor). Detached
     terminals' windows always draw: they're on screen.
@@ -90,7 +92,8 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
   - `text.rs`: `Pos`, `TextEdit::between`/`shift` (mirroring edits). `find.rs`, `fuzzy.rs` (nucleo).
   - `fs.rs`: one-folder listings with gitignore dimming, and the quick-open index.
 - `crates/pw-usage/`: the usage monitor.
-  - `monitor.rs`: the `Monitor` daemon thread (2-minute schedule, backoff).
+  - `monitor.rs`: the `Monitor` daemon thread (2-minute schedule, backoff; each poll on its own thread).
+  - `child.rs`: running a helper program with a bounded wait (process group, unjoined reader).
   - `report.rs`: `Report`, `Window`, `Span`, `Failure`.
   - `http.rs`: the closed `Endpoint` allowlist. `vendor.rs`: the closed `VendorCmd` list.
   - `claude.rs`, `codex.rs`, `antigravity.rs`: one poll per provider; their parsers are tested against
@@ -110,7 +113,7 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
   - `app/editor.rs`: `EditorMsg`, modes, tabs, groups, find, quick open, saving, the terminal panel, disk changes.
     `app/explorer.rs`: `ExplorerMsg`, the file tree's open/new/rename/trash and its keys.
   - `editor/`: Editor mode's state, no widgets. `mod.rs`: `EditorView` and `change`. `document.rs` (disk sync,
-    conflicts), `buffer.rs` (editing commands), `history.rs` (undo, 32 MB per file), `group.rs` (tabs),
+    conflicts), `buffer.rs` (editing commands), `history.rs` (undo, changed spans: ADR 0015), `group.rs` (tabs),
     `explorer.rs` (listings, virtualization), `quick_open.rs`, `find.rs`, `watch.rs` (`FsHub`).
   - `workspace.rs`: `WorkspaceView` (live `pane_grid::State` ⇄ `LayoutNode`, plus detached panes, mode, editor).
   - `split.rs`: `SplitTree` ⇄ `pane_grid` for agent panes and editor groups. `background.rs`: work off the UI
@@ -121,7 +124,8 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
     acknowledging, jumping (Ctrl+Shift+I). `notifier.rs`: the one desktop notification.
   - `usage.rs`: `Usage` registry (profiles, latest readings, the monitor).
   - `system.rs`: `SystemProfile` (latest sample, 5 minutes of history, pausing, tracked shells).
-  - `persist.rs`: state path + background `Saver`.
+  - `persist.rs`: state path + background `Saver`. `logging.rs`: the size-bounded log file next to it, and the
+    panic hook (ADR 0017).
   - `keymap.rs`: shortcuts + iced key → terminal key.
   - `theme.rs`: design tokens (ported from Science Portal's dark theme) + widget styles.
   - `fonts.rs`: bundled Inter + JetBrains Mono NL; `CellMetrics`.
@@ -180,4 +184,7 @@ Check at least:
   script, `\073` stands in for `;`) shows amber in the drawer, the rail and its pane's title bar; a few seconds of
   output then silence shows green; Ctrl+Shift+I (`attend`) jumps there and clears it; with the window
   unfocused, a desktop notification appears and clicking it jumps,
+- dragging a divider over a running agent: the terminal keeps its grid until the button is let go, then takes
+  its size once (`divider <ratio>` and `release` in a script),
+- a forced crash (`panic` in a script) leaves a backtrace in `logs/portal-workspaces.log` next to the state file,
 - that restarting restores layout, detached windows, cwds, the mode, tabs, cursors, groups and the expanded tree.

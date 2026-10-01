@@ -13,6 +13,7 @@ tracing.workspace = true
 ureq.workspace = true
 jiff.workspace = true
 base64 = "0.22"
+rustix = { version = "1", features = ["process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service.workspace = true

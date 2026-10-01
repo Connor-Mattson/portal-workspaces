@@ -60,9 +60,15 @@ impl TextEdit {
     }
 }
 
+/// Bytes compared at a time (with `memcmp`) before finding the first difference byte by byte.
+const CHUNK: usize = 64;
+
 /// Length in bytes of the longest common prefix, on a char boundary.
 pub fn common_prefix(a: &str, b: &str) -> usize {
-    let mut n = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let chunks = x.chunks(CHUNK).zip(y.chunks(CHUNK)).take_while(|(p, q)| p == q).count();
+    let same = (chunks * CHUNK).min(x.len()).min(y.len());
+    let mut n = same + x[same..].iter().zip(&y[same..]).take_while(|(p, q)| p == q).count();
     while !a.is_char_boundary(n) || !b.is_char_boundary(n) {
         n -= 1;
     }
@@ -71,7 +77,11 @@ pub fn common_prefix(a: &str, b: &str) -> usize {
 
 /// Length in bytes of the longest common suffix, on a char boundary.
 pub fn common_suffix(a: &str, b: &str) -> usize {
-    let mut n = a.bytes().rev().zip(b.bytes().rev()).take_while(|(x, y)| x == y).count();
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let chunks = x.rchunks(CHUNK).zip(y.rchunks(CHUNK)).take_while(|(p, q)| p == q).count();
+    let same = (chunks * CHUNK).min(x.len()).min(y.len());
+    let mut n = same
+        + x[..x.len() - same].iter().rev().zip(y[..y.len() - same].iter().rev()).take_while(|(p, q)| p == q).count();
     while !a.is_char_boundary(a.len() - n) || !b.is_char_boundary(b.len() - n) {
         n -= 1;
     }
@@ -128,6 +138,43 @@ mod tests {
             assert_eq!(apply(old, &edit), new, "{old:?} → {new:?}");
         }
         assert_eq!(TextEdit::between("same", "same"), None);
+    }
+
+    #[test]
+    fn common_ends_match_a_byte_by_byte_scan_across_chunks() {
+        fn slow_prefix(a: &str, b: &str) -> usize {
+            let mut n = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+            while !a.is_char_boundary(n) || !b.is_char_boundary(n) {
+                n -= 1;
+            }
+            n
+        }
+        fn slow_suffix(a: &str, b: &str) -> usize {
+            let mut n = a.bytes().rev().zip(b.bytes().rev()).take_while(|(x, y)| x == y).count();
+            while !a.is_char_boundary(a.len() - n) || !b.is_char_boundary(b.len() - n) {
+                n -= 1;
+            }
+            n
+        }
+        let base: String = "abcdéfgh日本\n".repeat(40);
+        let mut cases =
+            vec![(String::new(), String::new()), (base.clone(), base.clone()), (base.clone(), String::new())];
+        for at in [0, 1, 63, 64, 65, 127, 128, 200, base.len() - 1] {
+            let at = (0..=at).rev().find(|&i| base.is_char_boundary(i)).unwrap();
+            let mut changed = base.clone();
+            changed.insert(at, 'X');
+            cases.push((base.clone(), changed.clone()));
+            cases.push((base[..at].to_owned(), base.clone()));
+            cases.push((base[at..].to_owned(), base.clone()));
+            changed.replace_range(at..at + 1, "é");
+            cases.push((changed, base.clone()));
+        }
+        for (a, b) in &cases {
+            assert_eq!(common_prefix(a, b), slow_prefix(a, b), "{a:?} / {b:?}");
+            assert_eq!(common_suffix(a, b), slow_suffix(a, b), "{a:?} / {b:?}");
+            assert_eq!(common_prefix(b, a), slow_prefix(b, a));
+            assert_eq!(common_suffix(b, a), slow_suffix(b, a));
+        }
     }
 
     #[test]
