@@ -180,8 +180,9 @@ fn csi_u(code: u32, mods: Mods) -> Vec<u8> {
 /// don't execute pasted newlines.
 pub(crate) fn encode_paste(text: &str, mode: TermMode) -> Vec<u8> {
     if mode.contains(TermMode::BRACKETED_PASTE) {
-        // Strip anything that could end the bracket early.
-        let clean = text.replace("\x1b[201~", "");
+        // Without ESC the text can't end the bracket early (removing just `ESC[201~` leaves one behind
+        // in `ESC[20ESC[201~1~`), and without ^C a paste can't interrupt what it's pasted into.
+        let clean = text.replace(['\x1b', '\x03'], "");
         let mut out = Vec::with_capacity(clean.len() + 12);
         out.extend_from_slice(b"\x1b[200~");
         out.extend_from_slice(clean.as_bytes());
@@ -266,6 +267,10 @@ mod tests {
     #[test]
     fn paste_brackets_and_sanitizes() {
         assert_eq!(encode_paste("a\nb", TermMode::default()), b"a\rb");
-        assert_eq!(encode_paste("x\x1b[201~y", TermMode::BRACKETED_PASTE), b"\x1b[200~xy\x1b[201~");
+        assert_eq!(encode_paste("x\x1b[201~y", TermMode::BRACKETED_PASTE), b"\x1b[200~x[201~y\x1b[201~");
+        // Removing the end marker once would leave a new one behind.
+        let nested = encode_paste("\x1b[20\x1b[201~1~rm -rf ~\r", TermMode::BRACKETED_PASTE);
+        assert_eq!(nested, b"\x1b[200~[20[201~1~rm -rf ~\r\x1b[201~");
+        assert_eq!(encode_paste("a\x03b", TermMode::BRACKETED_PASTE), b"\x1b[200~ab\x1b[201~");
     }
 }

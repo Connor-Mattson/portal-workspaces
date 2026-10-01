@@ -43,10 +43,8 @@ pub struct ProfileEditor {
 impl ProfileEditor {
     pub fn new(tracked: &[UsageProfile]) -> Self {
         let home = crate::sessions::home_dir();
-        let candidates: Vec<Candidate> = discover(&home)
-            .into_iter()
-            .filter(|c| !tracked.iter().any(|t| same_source(t, &c.profile, &home)))
-            .collect();
+        let candidates: Vec<Candidate> =
+            discover(home).into_iter().filter(|c| !tracked.iter().any(|t| same_source(t, &c.profile, home))).collect();
         let mut editor = Self {
             id: ProfileId::new(),
             editing: false,
@@ -128,9 +126,9 @@ impl ProfileEditor {
     fn refresh(&mut self) {
         let home = crate::sessions::home_dir();
         let draft = self.draft();
-        self.preview = match self.others.iter().find(|p| same_source(p, &draft, &home)) {
+        self.preview = match self.others.iter().find(|p| same_source(p, &draft, home)) {
             Some(twin) => Err(format!("That account is already tracked as “{}”.", twin.name)),
-            None => describe(&draft, &home),
+            None => describe(&draft, home),
         };
     }
 

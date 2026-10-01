@@ -1,12 +1,19 @@
 //! Portal Workspaces: terminal workspaces for agentic development.
 
 mod app;
+mod attention;
+mod background;
+mod devtools;
+mod editor;
 mod fonts;
 mod icons;
 mod inbox;
 mod keymap;
+mod notifier;
 mod persist;
 mod sessions;
+mod split;
+mod system;
 mod theme;
 mod ui;
 mod usage;

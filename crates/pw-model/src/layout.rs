@@ -1,4 +1,4 @@
-//! The split tree that arranges a workspace's terminal panes.
+//! The split tree that arranges a workspace's terminal panes (and, generically, its editor groups).
 //!
 //! The GUI keeps its own live copy (iced's `pane_grid`); this tree is the persisted and testable
 //! form, and the place where layout rules such as the pane cap live.
@@ -20,49 +20,54 @@ pub enum Axis {
     Vertical,
 }
 
+/// A binary split tree. Agent terminals use it as [`LayoutNode`]; editor groups use `SplitTree<GroupId>`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
-pub enum LayoutNode {
+pub enum SplitTree<Id> {
     Split {
         axis: Axis,
         /// Share of the space given to `a`, in `(0, 1)`.
         ratio: f32,
-        a: Box<LayoutNode>,
-        b: Box<LayoutNode>,
+        a: Box<SplitTree<Id>>,
+        b: Box<SplitTree<Id>>,
     },
     Pane {
-        id: PaneId,
+        id: Id,
     },
 }
 
+/// The terminal layout of a workspace.
+pub type LayoutNode = SplitTree<PaneId>;
+
+/// A split was refused because the tree already holds its cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutFull;
 
 impl std::fmt::Display for LayoutFull {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "a workspace holds at most {MAX_PANES} terminals")
+        write!(f, "the layout is full")
     }
 }
 
 impl std::error::Error for LayoutFull {}
 
-impl LayoutNode {
-    pub fn pane(id: PaneId) -> Self {
+impl<Id: Copy + PartialEq> SplitTree<Id> {
+    pub fn pane(id: Id) -> Self {
         Self::Pane { id }
     }
 
-    pub fn split(axis: Axis, ratio: f32, a: LayoutNode, b: LayoutNode) -> Self {
+    pub fn split(axis: Axis, ratio: f32, a: Self, b: Self) -> Self {
         Self::Split { axis, ratio: clamp_ratio(ratio), a: Box::new(a), b: Box::new(b) }
     }
 
-    /// Pane ids in reading order (depth-first, `a` before `b`).
-    pub fn panes(&self) -> Vec<PaneId> {
+    /// Leaf ids in reading order (depth-first, `a` before `b`).
+    pub fn panes(&self) -> Vec<Id> {
         let mut out = Vec::new();
         self.collect(&mut out);
         out
     }
 
-    fn collect(&self, out: &mut Vec<PaneId>) {
+    fn collect(&self, out: &mut Vec<Id>) {
         match self {
             Self::Pane { id } => out.push(*id),
             Self::Split { a, b, .. } => {
@@ -79,24 +84,25 @@ impl LayoutNode {
         }
     }
 
-    pub fn contains(&self, pane: PaneId) -> bool {
+    pub fn contains(&self, pane: Id) -> bool {
         match self {
             Self::Pane { id } => *id == pane,
             Self::Split { a, b, .. } => a.contains(pane) || b.contains(pane),
         }
     }
 
-    /// Splits `target` in two, placing `new` after it (right or below). Enforces [`MAX_PANES`].
+    /// Splits `target` in two, placing `new` after it (right or below), unless the tree already holds `cap`
+    /// leaves.
     ///
     /// Returns `Ok(false)` if `target` isn't in the tree.
-    pub fn split_pane(&mut self, target: PaneId, axis: Axis, new: PaneId) -> Result<bool, LayoutFull> {
-        if self.pane_count() >= MAX_PANES {
+    pub fn split_leaf(&mut self, target: Id, axis: Axis, new: Id, cap: usize) -> Result<bool, LayoutFull> {
+        if self.pane_count() >= cap {
             return Err(LayoutFull);
         }
         Ok(self.split_inner(target, axis, new))
     }
 
-    fn split_inner(&mut self, target: PaneId, axis: Axis, new: PaneId) -> bool {
+    fn split_inner(&mut self, target: Id, axis: Axis, new: Id) -> bool {
         match self {
             Self::Pane { id } if *id == target => {
                 *self = Self::split(axis, 0.5, Self::pane(target), Self::pane(new));
@@ -108,7 +114,7 @@ impl LayoutNode {
     }
 
     /// Removes `target`; its sibling takes the freed space. Returns `None` if the tree would be empty.
-    pub fn close_pane(self, target: PaneId) -> Option<Self> {
+    pub fn close_pane(self, target: Id) -> Option<Self> {
         match self {
             Self::Pane { id } if id == target => None,
             pane @ Self::Pane { .. } => Some(pane),
@@ -126,6 +132,13 @@ impl LayoutNode {
             pane @ Self::Pane { .. } => pane,
             Self::Split { axis, ratio, a, b } => Self::split(axis, ratio, a.sanitized(), b.sanitized()),
         }
+    }
+}
+
+impl LayoutNode {
+    /// Splits a terminal in two. Enforces [`MAX_PANES`].
+    pub fn split_pane(&mut self, target: PaneId, axis: Axis, new: PaneId) -> Result<bool, LayoutFull> {
+        self.split_leaf(target, axis, new, MAX_PANES)
     }
 }
 

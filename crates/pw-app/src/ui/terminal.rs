@@ -18,6 +18,7 @@ use crate::app::Message;
 use crate::fonts::{self, CellMetrics};
 use crate::sessions::PaneRuntime;
 use crate::theme::to_color;
+use crate::ui::term_menu;
 
 /// Inner padding between the pane edge and the text grid.
 const PAD_X: f32 = 8.0;
@@ -29,10 +30,31 @@ const WHEEL_LINES: f32 = 3.0;
 #[derive(Debug, Clone)]
 pub enum TermMsg {
     Resize(GridSize),
-    MouseDown { point: GridPoint, right_half: bool, button: MouseButton, clicks: u8, mods: Mods },
-    MouseDrag { point: GridPoint, right_half: bool, button: MouseButton, mods: Mods },
-    MouseUp { point: GridPoint, button: MouseButton, mods: Mods },
-    Wheel { lines: i32, point: GridPoint, mods: Mods },
+    /// `menu_at` is where the right-click menu goes if this click opens it (window coordinates).
+    MouseDown {
+        point: GridPoint,
+        right_half: bool,
+        button: MouseButton,
+        clicks: u8,
+        mods: Mods,
+        menu_at: Point,
+    },
+    MouseDrag {
+        point: GridPoint,
+        right_half: bool,
+        button: MouseButton,
+        mods: Mods,
+    },
+    MouseUp {
+        point: GridPoint,
+        button: MouseButton,
+        mods: Mods,
+    },
+    Wheel {
+        lines: i32,
+        point: GridPoint,
+        mods: Mods,
+    },
 }
 
 pub struct TerminalCanvas<'a> {
@@ -132,6 +154,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
                     button,
                     clicks,
                     mods: mods(state.modifiers),
+                    menu_at: term_menu::place(position, bounds),
                 }))
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {

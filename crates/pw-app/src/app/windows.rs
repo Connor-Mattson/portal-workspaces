@@ -16,6 +16,7 @@ const ICON_RGBA: &[u8] = include_bytes!("../../../../assets/icons/portal-workspa
 #[derive(Debug, Clone)]
 pub enum WindowMsg {
     Focused(window::Id),
+    Unfocused(window::Id),
     Resized(window::Id, Size),
     CloseRequested(window::Id),
     Closed(window::Id),
@@ -38,6 +39,8 @@ fn settings(size: Size, min_size: Size) -> window::Settings {
         icon: window::icon::from_rgba(ICON_RGBA.to_vec(), 64, 64).ok(),
         // Closing saves and quits (the main window) or docks the terminal (its own window).
         exit_on_close_request: false,
+        // A scripted run stays on top, so its screenshots show what it drew.
+        level: if crate::devtools::scripted() { window::Level::AlwaysOnTop } else { window::Level::Normal },
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
             application_id: "portal-workspaces".to_owned(),
@@ -52,7 +55,14 @@ impl App {
         match msg {
             WindowMsg::Focused(id) => {
                 if id == self.main_window || self.pane_windows.contains_key(&id) {
+                    self.focused_window = Some(id);
                     self.refocus(|app| app.key_window = id);
+                }
+            }
+            // Moving between our own windows reports the new one's focus after this.
+            WindowMsg::Unfocused(id) => {
+                if self.focused_window == Some(id) {
+                    self.focused_window = None;
                 }
             }
             WindowMsg::Resized(id, size) => {
@@ -66,7 +76,7 @@ impl App {
                 }
                 self.touch();
             }
-            WindowMsg::CloseRequested(id) if id == self.main_window => return self.quit(),
+            WindowMsg::CloseRequested(id) if id == self.main_window => return self.request_quit(),
             WindowMsg::CloseRequested(id) => {
                 if let Some(&pane) = self.pane_windows.get(&id) {
                     return self.dock(pane);

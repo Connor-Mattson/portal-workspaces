@@ -73,6 +73,24 @@ pub fn migrate(mut value: Value) -> Result<Value, String> {
                 }
                 doc.insert("schema_version".into(), 3.into());
             }
+            // 3 → 4: Editor mode. Every workspace starts as agents; `editor` and `ui.editor_font_size` default.
+            3 => {
+                let doc = value.as_object_mut().ok_or("state is not an object")?;
+                for ws in doc.get_mut("workspaces").and_then(Value::as_array_mut).into_iter().flatten() {
+                    ws.as_object_mut().ok_or("workspace is not an object")?.insert("mode".into(), "agents".into());
+                }
+                doc.insert("schema_version".into(), 4.into());
+            }
+            // 4 → 5: the system profile. `ui.system_expanded` defaults (open) like every `UiPrefs` field.
+            4 => {
+                let doc = value.as_object_mut().ok_or("state is not an object")?;
+                doc.insert("schema_version".into(), 5.into());
+            }
+            // 5 → 6: desktop notifications. `ui.notifications` defaults (on) like every `UiPrefs` field.
+            5 => {
+                let doc = value.as_object_mut().ok_or("state is not an object")?;
+                doc.insert("schema_version".into(), 6.into());
+            }
             v => return Err(format!("unsupported schema_version {v} (this build reads {SCHEMA_VERSION})")),
         }
     }
@@ -185,6 +203,81 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&v2).unwrap()).unwrap();
         let LoadOutcome::Loaded(loaded) = load(&path) else { panic!("expected Loaded") };
         assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn version_3_files_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = sample();
+        let mut v3 = serde_json::to_value(&state).unwrap();
+        v3["schema_version"] = 3.into();
+        for ws in v3["workspaces"].as_array_mut().unwrap() {
+            let ws = ws.as_object_mut().unwrap();
+            ws.remove("mode");
+            ws.remove("editor");
+        }
+        v3["ui"].as_object_mut().unwrap().remove("editor_font_size");
+        fs::write(&path, serde_json::to_vec(&v3).unwrap()).unwrap();
+        let LoadOutcome::Loaded(loaded) = load(&path) else { panic!("expected Loaded") };
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert_eq!(loaded.ui, state.ui);
+        for (got, want) in loaded.workspaces.iter().zip(&state.workspaces) {
+            assert_eq!(got.mode, crate::Mode::Agents);
+            assert_eq!((&got.layout, &got.panes, &got.detached), (&want.layout, &want.panes, &want.detached));
+            assert_eq!(got.editor.groups.len(), 1);
+            assert!(!got.panes.contains_key(&got.editor.terminal.id));
+        }
+    }
+
+    #[test]
+    fn version_4_files_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = sample();
+        let mut v4 = serde_json::to_value(&state).unwrap();
+        v4["schema_version"] = 4.into();
+        v4["ui"].as_object_mut().unwrap().remove("system_expanded");
+        fs::write(&path, serde_json::to_vec(&v4).unwrap()).unwrap();
+        let LoadOutcome::Loaded(loaded) = load(&path) else { panic!("expected Loaded") };
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.ui.system_expanded);
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn version_5_files_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = sample();
+        let mut v5 = serde_json::to_value(&state).unwrap();
+        v5["schema_version"] = 5.into();
+        v5["ui"].as_object_mut().unwrap().remove("notifications");
+        fs::write(&path, serde_json::to_vec(&v5).unwrap()).unwrap();
+        let LoadOutcome::Loaded(loaded) = load(&path) else { panic!("expected Loaded") };
+        assert_eq!(loaded.schema_version, SCHEMA_VERSION);
+        assert!(loaded.ui.notifications);
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn editor_sessions_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = sample();
+        let ws = &mut state.workspaces[1];
+        ws.mode = crate::Mode::Editor;
+        let group = ws.editor.focused;
+        let spec = crate::GroupSpec {
+            tabs: vec![crate::OpenFile { path: "src/main.rs".into(), line: 12, column: 4, preview: false }],
+            active: Some("src/main.rs".into()),
+        };
+        ws.editor.split(group, crate::Axis::Vertical, crate::GroupId::new(), spec).unwrap();
+        ws.editor.expanded = vec!["src".into()];
+        ws.editor.show_terminal = false;
+        state.ui.editor_font_size = 15.0;
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path).into_state(), state);
     }
 
     #[test]

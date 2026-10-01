@@ -2,10 +2,12 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoopSender, Msg};
 
+use crate::activity::Activity;
 use crate::color::Palette;
 
 /// Something the GUI needs to react to.
@@ -21,6 +23,18 @@ pub enum TermEvent {
     Exited(Option<i32>),
     /// The program asked to copy text (OSC 52).
     ClipboardStore(String),
+    /// The program sent a desktop notification (OSC 9, 777 or 99): agents say they're done or
+    /// need you this way.
+    Notify {
+        title: Option<String>,
+        body: String,
+    },
+    /// The terminal has been printing steadily for a while (see [`crate::ActivityConfig`]).
+    Busy,
+    /// A busy terminal went quiet, after `worked` of output.
+    Idle {
+        worked: Duration,
+    },
 }
 
 pub(crate) type Sink = Arc<dyn Fn(TermEvent) + Send + Sync>;
@@ -30,6 +44,7 @@ pub(crate) struct Shared {
     pub sink: Sink,
     pub dirty: AtomicBool,
     pub palette: Palette,
+    pub activity: Activity,
     pub window_size: Mutex<WindowSize>,
     /// Set right after the event loop is created; the terminal needs a listener before that.
     pub loop_tx: OnceLock<EventLoopSender>,

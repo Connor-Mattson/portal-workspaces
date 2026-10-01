@@ -10,17 +10,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 use alacritty_terminal::event::{OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{self, Term, TermMode, viewport_to_point};
 use alacritty_terminal::tty;
 
+use crate::activity::{Activity, ActivityConfig};
 use crate::color::Palette;
 use crate::events::{Listener, Shared, TermEvent};
 use crate::input::{self, KeyInput};
 use crate::mouse::{self, MouseEvent, MouseEventKind};
 use crate::snapshot::{self, Snapshot};
+use crate::tap::TappedPty;
 
 /// Terminal size in cells, plus the cell size in pixels (reported to programs that ask).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +84,8 @@ pub struct SessionConfig {
     /// Program and arguments. `None` runs the user's login shell the platform's usual way.
     pub shell: Option<(String, Vec<String>)>,
     pub env: HashMap<String, String>,
+    /// When output counts as busy and when it's quiet again.
+    pub activity: ActivityConfig,
 }
 
 impl SessionConfig {
@@ -95,7 +99,15 @@ impl SessionConfig {
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
-        Self { cwd, size, scrollback: 10_000, palette: Palette::default(), shell: None, env }
+        Self {
+            cwd,
+            size,
+            scrollback: 10_000,
+            palette: Palette::default(),
+            shell: None,
+            env,
+            activity: ActivityConfig::default(),
+        }
     }
 }
 
@@ -131,6 +143,7 @@ impl Session {
             sink: Arc::new(sink),
             dirty: false.into(),
             palette: config.palette,
+            activity: Activity::new(config.activity),
             window_size: Mutex::new(size.window_size()),
             loop_tx: OnceLock::new(),
         });
@@ -148,6 +161,7 @@ impl Session {
         };
         let pty = tty::new(&options, size.window_size(), 0).map_err(SpawnError)?;
         let pid = pty.child().id();
+        let pty = TappedPty::new(pty, shared.clone()).map_err(SpawnError)?;
 
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false).map_err(SpawnError)?;
         let sender = event_loop.channel();
@@ -284,8 +298,38 @@ impl Session {
         self.term.lock().selection = None;
     }
 
+    /// Selects the whole history and screen, down to the last line with anything on it.
+    pub fn select_all(&self) {
+        let mut term = self.term.lock();
+        let cursor = term.grid().cursor.point.line;
+        let mut last = term.bottommost_line();
+        while last > cursor && term.grid()[last].is_clear() {
+            last -= 1;
+        }
+        let mut selection =
+            Selection::new(SelectionType::Simple, Point::new(term.topmost_line(), Column(0)), Side::Left);
+        selection.update(Point::new(last, term.last_column()), Side::Right);
+        term.selection = Some(selection);
+    }
+
     pub fn selection_text(&self) -> Option<String> {
         self.term.lock().selection_to_string().filter(|s| !s.is_empty())
+    }
+
+    /// The selected text, if any of the selection is on screen, dropping the selection. This is
+    /// what Ctrl+C copies before it falls back to interrupting: a selection scrolled out of view
+    /// shouldn't make Ctrl+C silently stop interrupting.
+    pub fn take_visible_selection(&self) -> Option<String> {
+        let mut term = self.term.lock();
+        let range = term.selection.as_ref()?.to_range(&term)?;
+        let top = Line(-(term.grid().display_offset() as i32));
+        let bottom = top + (term.screen_lines() - 1);
+        if range.end.line < top || range.start.line > bottom {
+            return None;
+        }
+        let text = term.selection_to_string().filter(|s| !s.is_empty())?;
+        term.selection = None;
+        Some(text)
     }
 
     /// Tells the program about focus changes if it asked (focus reporting, mode 1004).

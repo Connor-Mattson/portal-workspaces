@@ -40,7 +40,7 @@ pub struct Usage {
 impl Usage {
     pub fn new(profiles: Vec<UsageProfile>) -> Self {
         let (tx, inbox) = inbox::channel("pw-usage-updates");
-        let monitor = Monitor::spawn(Providers::new(crate::sessions::home_dir()), move |update| {
+        let monitor = Monitor::spawn(Providers::new(crate::sessions::home_dir().to_path_buf()), move |update| {
             let _ = tx.unbounded_send(update);
         });
         monitor.set_profiles(profiles.clone());

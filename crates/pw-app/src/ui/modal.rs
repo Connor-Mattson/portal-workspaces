@@ -1,10 +1,11 @@
-//! Sheets shown over the app: workspace editor, confirmations and the shortcut list.
+//! Sheets shown over the app: the workspace sheet, confirmations, unsaved changes and the shortcut
+//! list.
 
 use std::path::PathBuf;
 
 use iced::widget::{Space, button, center, column, container, mouse_area, opaque, row, text, text_input};
 use iced::{Alignment, Element, Fill, Length, Task};
-use pw_model::{Preset, Workspace, WorkspaceId};
+use pw_model::{GroupId, Preset, Workspace, WorkspaceId};
 
 use crate::app::{App, Message};
 use crate::fonts;
@@ -16,7 +17,7 @@ use crate::ui::{preset_glyph, tildify};
 const NAME_INPUT: &str = "workspace-name";
 
 pub enum Modal {
-    Editor(Editor),
+    WorkspaceSheet(WorkspaceSheet),
     ConfirmDelete(WorkspaceId),
     ConfirmPreset {
         workspace: WorkspaceId,
@@ -26,6 +27,26 @@ pub enum Modal {
     Shortcuts,
     /// Track a new AI account, or edit one.
     Profile(ProfileEditor),
+    /// Files with unsaved edits stand in the way of `then`.
+    Unsaved {
+        files: Vec<(WorkspaceId, PathBuf)>,
+        then: Pending,
+        /// Why saving failed, if it did.
+        error: Option<String>,
+    },
+    /// Move a file or folder of the workspace to the trash.
+    ConfirmTrash {
+        workspace: WorkspaceId,
+        path: PathBuf,
+    },
+}
+
+/// What happens once unsaved files are saved or discarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pending {
+    Quit,
+    CloseTab { workspace: WorkspaceId, group: GroupId, path: PathBuf },
+    CloseGroup { workspace: WorkspaceId, group: GroupId },
 }
 
 #[derive(Debug, Clone)]
@@ -37,12 +58,14 @@ pub enum ModalMsg {
     Preset(Preset),
     Profile(ProfileMsg),
     Delete,
+    /// Go ahead without saving (the unsaved-changes sheet).
+    Discard,
     Submit,
     Cancel,
 }
 
 /// Create or edit a workspace.
-pub struct Editor {
+pub struct WorkspaceSheet {
     /// `None` when creating.
     pub target: Option<WorkspaceId>,
     pub name: String,
@@ -53,7 +76,7 @@ pub struct Editor {
     name_edited: bool,
 }
 
-impl Editor {
+impl WorkspaceSheet {
     pub fn new_workspace() -> Self {
         Self {
             target: None,
@@ -117,19 +140,33 @@ pub fn focus_first_field() -> Task<Message> {
 
 pub fn view<'a>(app: &'a App, modal: &'a Modal) -> Element<'a, Message> {
     let (width, content) = match modal {
-        Modal::Editor(editor) => (460.0, editor_view(app, editor)),
+        Modal::WorkspaceSheet(sheet) => (460.0, sheet_view(app, sheet)),
         Modal::ConfirmDelete(id) => {
             let name = app.workspaces.iter().find(|w| w.id() == *id).map_or("this workspace", |w| &w.model.name);
             let n = app.workspaces.iter().find(|w| w.id() == *id).map_or(0, |w| w.pane_count());
+            let unsaved = app.unsaved().iter().filter(|(w, _)| w == id).count();
+            let mut detail = format!(
+                "Its {n} terminal{} will be closed. Files in the project folder are not touched.",
+                if n == 1 { "" } else { "s" }
+            );
+            if unsaved > 0 {
+                detail.push_str(&format!(
+                    " Unsaved edits to {unsaved} file{} will be lost.",
+                    if unsaved == 1 { "" } else { "s" }
+                ));
+            }
+            (400.0, confirm(format!("Delete “{name}”?"), detail, "Delete workspace"))
+        }
+        Modal::Unsaved { files, then, error } => (440.0, unsaved(app, files, then, error.as_deref())),
+        Modal::ConfirmTrash { path, .. } => {
+            let name =
+                path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
             (
                 400.0,
                 confirm(
-                    format!("Delete “{name}”?"),
-                    format!(
-                        "Its {n} terminal{} will be closed. Files in the project folder are not touched.",
-                        if n == 1 { "" } else { "s" }
-                    ),
-                    "Delete workspace",
+                    format!("Move “{name}” to the Trash?"),
+                    format!("{} can be restored from the Trash.", path.display()),
+                    "Move to Trash",
                 ),
             )
         }
@@ -144,7 +181,7 @@ pub fn view<'a>(app: &'a App, modal: &'a Modal) -> Element<'a, Message> {
                 "Change layout",
             ),
         ),
-        Modal::Shortcuts => (440.0, shortcuts()),
+        Modal::Shortcuts => (880.0, shortcuts()),
         Modal::Profile(editor) => (480.0, profile_editor::view(editor)),
     };
     let card = container(content).width(width).padding(theme::S6).style(theme::card);
@@ -156,7 +193,7 @@ fn field_label(label: &str) -> Element<'_, Message> {
     text(label).size(theme::T_SM).font(fonts::UI_MEDIUM).color(theme::FG_2).into()
 }
 
-fn editor_view<'a>(app: &'a App, editor: &'a Editor) -> Element<'a, Message> {
+fn sheet_view<'a>(app: &'a App, editor: &'a WorkspaceSheet) -> Element<'a, Message> {
     let creating = editor.target.is_none();
     let first_run = app.workspaces.is_empty();
     let title = if creating { "New workspace" } else { "Edit workspace" };
@@ -288,16 +325,35 @@ fn confirm<'a>(title: String, detail: String, action: &'a str) -> Element<'a, Me
 }
 
 fn shortcuts<'a>() -> Element<'a, Message> {
-    let rows = column(keymap::cheatsheet().into_iter().map(|(label, keys)| {
-        row![
-            text(label).size(theme::T_MD).font(fonts::UI).color(theme::FG_2),
-            Space::new().width(Fill),
-            container(text(keys).size(theme::T_SM).font(fonts::MONO)).padding([2, 8]).style(theme::keycap),
-        ]
-        .align_y(Alignment::Center)
-        .into()
-    }))
-    .spacing(theme::S2);
+    let section = |title: &'static str, entries: Vec<(&'static str, String)>| {
+        let rows = column(entries.into_iter().map(|(label, keys)| {
+            // Alternatives (two spaces apart in the cheatsheet) get a keycap each.
+            let caps = row(keys.split("  ").map(|k| {
+                container(text(k.to_owned()).size(theme::T_SM).font(fonts::MONO).wrapping(text::Wrapping::None))
+                    .padding([2, 6])
+                    .style(theme::keycap)
+                    .into()
+            }))
+            .spacing(theme::S1);
+            row![text(label).size(theme::T_MD).font(fonts::UI).color(theme::FG_2).width(Fill), caps]
+                .spacing(theme::S3)
+                .align_y(Alignment::Center)
+                .into()
+        }))
+        .spacing(theme::S2);
+        column![text(title.to_uppercase()).size(theme::T_XS).font(fonts::UI_SEMIBOLD).color(theme::FG_3), rows]
+            .spacing(theme::S2)
+    };
+    let mut left = column![].spacing(theme::S6).width(Fill);
+    let mut right = column![].spacing(theme::S6).width(Fill);
+    // Workspaces and Agents on the left; terminal text and Editor on the right.
+    for (i, (title, entries)) in keymap::cheatsheet().into_iter().enumerate() {
+        if i < 2 {
+            left = left.push(section(title, entries));
+        } else {
+            right = right.push(section(title, entries));
+        }
+    }
     column![
         row![
             text("Keyboard shortcuts").size(18).font(fonts::UI_SEMIBOLD).color(theme::FG),
@@ -308,8 +364,83 @@ fn shortcuts<'a>() -> Element<'a, Message> {
                 .on_press(Message::Modal(ModalMsg::Submit)),
         ]
         .align_y(Alignment::Center),
-        rows,
+        row![left, right].spacing(theme::S6 + theme::S2),
     ]
     .spacing(theme::S4)
     .into()
+}
+
+/// Unsaved files stand in the way: save them, discard them, or don't go ahead.
+fn unsaved<'a>(
+    app: &'a App,
+    files: &'a [(WorkspaceId, PathBuf)],
+    then: &Pending,
+    error: Option<&'a str>,
+) -> Element<'a, Message> {
+    let n = files.len();
+    let title = match then {
+        Pending::Quit => format!("Save changes to {n} file{} before quitting?", if n == 1 { "" } else { "s" }),
+        _ if n == 1 => format!(
+            "Save changes to {}?",
+            files[0]
+                .1
+                .file_name()
+                .map_or_else(|| files[0].1.display().to_string(), |f| f.to_string_lossy().into_owned())
+        ),
+        _ => format!("Save changes to {n} files?"),
+    };
+    let list = column(files.iter().take(8).map(|(ws, path)| {
+        let workspace = app.workspaces.iter().find(|w| w.id() == *ws).map_or("", |w| w.model.name.as_str());
+        row![
+            text(path.display().to_string())
+                .size(theme::T_SM)
+                .font(fonts::MONO)
+                .color(theme::FG_2)
+                .wrapping(text::Wrapping::None),
+            Space::new().width(Fill),
+            text(workspace).size(theme::T_XS).font(fonts::UI).color(theme::FG_3).wrapping(text::Wrapping::None),
+        ]
+        .spacing(theme::S2)
+        .into()
+    }))
+    .spacing(6);
+    let mut content = column![
+        text(title).size(18).font(fonts::UI_SEMIBOLD).color(theme::FG),
+        text("Your changes will be lost if you don't save them.").size(theme::T_MD).font(fonts::UI).color(theme::FG_3),
+        container(list).padding([8, 10]).width(Fill).style(theme::usage_card),
+    ]
+    .spacing(theme::S3);
+    if n > 8 {
+        content =
+            content.push(text(format!("and {} more", n - 8)).size(theme::T_XS).font(fonts::UI).color(theme::FG_3));
+    }
+    if let Some(error) = error {
+        content = content.push(
+            container(text(error).size(theme::T_SM).font(fonts::UI))
+                .padding([6, 10])
+                .width(Fill)
+                .style(theme::error_note),
+        );
+    }
+    content
+        .push(
+            row![
+                button(text("Don't save").size(theme::T_MD).font(fonts::UI_MEDIUM))
+                    .padding([7, 12])
+                    .style(theme::ghost_button)
+                    .on_press(Message::Modal(ModalMsg::Discard)),
+                Space::new().width(Fill),
+                button(text("Cancel").size(theme::T_MD).font(fonts::UI_MEDIUM))
+                    .padding([7, 14])
+                    .style(theme::secondary_button)
+                    .on_press(Message::Modal(ModalMsg::Cancel)),
+                button(text(if n == 1 { "Save" } else { "Save all" }).size(theme::T_MD).font(fonts::UI_SEMIBOLD))
+                    .padding([7, 14])
+                    .style(theme::primary_button)
+                    .on_press(Message::Modal(ModalMsg::Submit)),
+            ]
+            .spacing(theme::S2)
+            .align_y(Alignment::Center),
+        )
+        .into()
 }

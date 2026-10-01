@@ -1,0 +1,18 @@
+[package]
+name = "pw-code"
+description = "Portal Workspaces code editing: languages, highlighting, editing rules, file listing, fuzzy finding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+two-face.workspace = true
+syntect.workspace = true
+ignore.workspace = true
+nucleo-matcher.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

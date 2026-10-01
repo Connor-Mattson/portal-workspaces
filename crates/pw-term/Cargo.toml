@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 alacritty_terminal.workspace = true
+# alacritty's PTY traits take its poller types; same version as alacritty's.
+polling = "3"
 tracing.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,29 +1,42 @@
 //! The application: state, messages, update and subscriptions (Elm architecture).
 
+mod attention;
+mod editor;
+mod explorer;
 mod windows;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
-use iced::widget::Space;
-use iced::widget::pane_grid;
+use iced::widget::{Space, pane_grid, stack};
 use iced::{Element, Subscription, Task, clipboard, event, time, window};
-use pw_model::{Axis, PaneId, PersistedState, Preset, ProfileId, SCHEMA_VERSION, UiPrefs, Workspace, WorkspaceId};
+use pw_model::{
+    Axis, Mode, PaneId, PersistedState, Preset, ProfileId, SCHEMA_VERSION, UiPrefs, Workspace, WorkspaceId,
+};
 use pw_term::{GridSize, MouseButton, MouseEvent, MouseEventKind, SelectionKind, TermEvent};
 
+use crate::devtools::{Dev, DevMsg};
+use crate::editor::Focus;
+use crate::editor::watch::FsHub;
 use crate::fonts::CellMetrics;
-use crate::keymap::{self, Action};
+use crate::keymap::{self, Action, Context};
+use crate::notifier::{NoteEvent, Notifier};
 use crate::persist::Saver;
 use crate::sessions::Sessions;
+use crate::system::SystemProfile;
 use crate::ui;
-use crate::ui::modal::{Editor, Modal, ModalMsg};
+use crate::ui::modal::{Modal, ModalMsg, WorkspaceSheet};
 use crate::ui::profile_editor::{self, ProfileEditor};
+use crate::ui::term_menu::{MenuMsg, TermMenu};
 use crate::ui::terminal::TermMsg;
 use crate::usage::Usage;
 use crate::workspace::WorkspaceView;
 
+pub use editor::{Clicked, EditorMsg};
+pub use explorer::ExplorerMsg;
 pub use windows::WindowMsg;
 
 /// How long after the last change state is written to disk.
@@ -62,6 +75,8 @@ pub enum Message {
     ApplyPreset(Preset),
     Modal(ModalMsg),
     Paste(Option<String>),
+    /// The terminal's right-click menu.
+    TermMenu(MenuMsg),
     /// A reading from the usage monitor.
     Usage(pw_usage::Update),
     RefreshUsage,
@@ -70,9 +85,23 @@ pub enum Message {
     AddProfile,
     EditProfile(ProfileId),
     ToggleUsage,
+    /// A reading from the system monitor.
+    System(Box<pw_system::Sample>),
+    ToggleSystem,
     SaveTick,
     CwdTick,
     Window(WindowMsg),
+    /// Agents or Editor, for the active workspace.
+    SetMode(Mode),
+    Editor(EditorMsg),
+    Explorer(ExplorerMsg),
+    /// Files changed under a workspace's watched folders.
+    Fs(WorkspaceId, Vec<PathBuf>),
+    /// The scripted UI driver (see `devtools`).
+    Dev(DevMsg),
+    /// The desktop notification was shown, clicked or closed.
+    Note(NoteEvent),
+    ToggleNotifications,
 }
 
 pub struct App {
@@ -80,14 +109,29 @@ pub struct App {
     pub(crate) active: Option<WorkspaceId>,
     pub(crate) sessions: Sessions,
     pub(crate) usage: Usage,
+    pub(crate) system: SystemProfile,
     pub(crate) prefs: UiPrefs,
     pub(crate) metrics: CellMetrics,
     pub(crate) modal: Option<Modal>,
+    /// A terminal's right-click menu, while it's open.
+    pub(crate) term_menu: Option<TermMenu>,
     pub(crate) main_window: window::Id,
     /// Detached terminals' windows (see `windows`).
     pub(crate) pane_windows: HashMap<window::Id, PaneId>,
     /// The app window that last had focus. Keys go to its terminal.
     pub(crate) key_window: window::Id,
+    /// The app window that has the system's focus now; `None` while you're in another app.
+    pub(crate) focused_window: Option<window::Id>,
+    /// Desktop notifications for terminals that want you (see `app::attention`).
+    pub(crate) notifier: Notifier,
+    /// Orders attention app-wide, so the oldest is answered first.
+    attention_seq: u64,
+    /// Watches the folders the editors show.
+    pub(crate) fs: FsHub,
+    /// The last tab or tree row clicked, for double clicks.
+    pub(crate) last_click: Option<(Clicked, Instant)>,
+    /// The scripted UI driver's pending screenshot.
+    pub(crate) dev: Dev,
     dirty: bool,
     saver: Saver,
 }
@@ -100,12 +144,20 @@ impl App {
             active: None,
             sessions: Sessions::default(),
             usage: Usage::new(state.usage_profiles),
+            system: SystemProfile::new(),
             metrics: CellMetrics::for_size(state.ui.font_size),
             prefs: state.ui,
             modal: None,
+            term_menu: None,
             main_window,
             pane_windows: HashMap::new(),
             key_window: main_window,
+            focused_window: None,
+            notifier: Notifier::default(),
+            attention_seq: 0,
+            fs: FsHub::default(),
+            last_click: None,
+            dev: Dev::default(),
             dirty: false,
             saver,
         };
@@ -114,10 +166,12 @@ impl App {
             // Restored detached windows open after the main one; it keeps the focus.
             Some(id) => tasks.push(app.activate(id).chain(window::gain_focus(main_window))),
             None => {
-                app.modal = Some(Modal::Editor(Editor::new_workspace()));
+                app.modal = Some(Modal::WorkspaceSheet(WorkspaceSheet::new_workspace()));
                 tasks.push(ui::modal::focus_first_field());
             }
         }
+        app.sync_system();
+        tasks.extend(crate::devtools::from_env());
         (app, Task::batch(tasks))
     }
 
@@ -129,29 +183,44 @@ impl App {
                 None => format!("{label} — Portal Workspaces"),
             };
         }
-        match self.active_view() {
+        let title = match self.active_view() {
             Some(ws) => format!("{} — Portal Workspaces", ws.model.name),
             None => "Portal Workspaces".to_owned(),
+        };
+        // The taskbar shows how many workspaces want you.
+        match self.attention_count() {
+            0 => title,
+            n => format!("({n}) {title}"),
         }
     }
 
     pub fn view(&self, window: window::Id) -> Element<'_, Message> {
-        if window == self.main_window {
+        let content = if window == self.main_window {
             ui::view(self)
         } else if let Some(&pane) = self.pane_windows.get(&window) {
             ui::pane_window::view(self, pane)
         } else {
             // A window on its way out (a terminal, just docked).
             Space::new().into()
-        }
+        };
+        // Always a stack, so opening the menu doesn't rebuild the window's widget state (focus, drags).
+        let menu = match &self.term_menu {
+            Some(menu) if menu.window == window => ui::term_menu::view(menu),
+            _ => Space::new().into(),
+        };
+        stack![content, menu].into()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             self.sessions.events().map(|(id, event)| Message::Term(id, event)),
             self.usage.events().map(Message::Usage),
+            self.system.events().map(|sample| Message::System(Box::new(sample))),
+            self.fs.events().map(|(id, paths)| Message::Fs(id, paths)),
+            self.notifier.events().map(Message::Note),
             event::listen_with(on_runtime_event),
             time::every(CWD_POLL).map(|_| Message::CwdTick),
+            self.dev.subscription(),
         ];
         // The save timer only exists while there is something to save, so an idle app has no
         // timers but the cwd poll.
@@ -167,7 +236,7 @@ impl App {
         self.workspaces.iter().find(|w| Some(w.id()) == self.active)
     }
 
-    fn active_mut(&mut self) -> Option<&mut WorkspaceView> {
+    pub(crate) fn active_mut(&mut self) -> Option<&mut WorkspaceView> {
         let active = self.active?;
         self.workspaces.iter_mut().find(|w| w.id() == active)
     }
@@ -176,9 +245,9 @@ impl App {
         self.workspaces.iter().position(|w| w.id() == id)
     }
 
-    /// The workspace a pane belongs to, in its grid or detached.
+    /// The workspace a terminal belongs to: in its grid, detached, or its editor's.
     pub(crate) fn workspace_of(&self, pane: PaneId) -> Option<&WorkspaceView> {
-        self.workspaces.iter().find(|ws| ws.is_detached(pane) || ws.handle(pane).is_some())
+        self.workspaces.iter().find(|ws| ws.owns(pane))
     }
 
     /// The main window's focused pane.
@@ -186,12 +255,31 @@ impl App {
         self.active_view()?.focused
     }
 
-    /// The pane that gets the keys: the detached terminal whose window has focus, or the main window's
-    /// focused pane.
-    fn key_pane(&self) -> Option<PaneId> {
-        match self.pane_windows.get(&self.key_window) {
-            Some(&pane) => Some(pane),
-            None => self.focused_pane(),
+    /// The terminal that gets the keys: the detached terminal whose window has focus, or in the main
+    /// window the grid's focused pane (Agents) or the editor's terminal when it has the keys (Editor).
+    pub(crate) fn key_pane(&self) -> Option<PaneId> {
+        if let Some(&pane) = self.pane_windows.get(&self.key_window) {
+            return Some(pane);
+        }
+        let ws = self.active_view()?;
+        match ws.model.mode {
+            Mode::Agents => ws.focused,
+            Mode::Editor => {
+                let editor = ws.editor.as_ref()?;
+                (editor.focus == Focus::Terminal && editor.show_terminal).then_some(editor.terminal.id)
+            }
+        }
+    }
+
+    /// What has the keys, for shortcuts.
+    fn context(&self) -> Context {
+        if self.key_window != self.main_window {
+            return Context::Terminal;
+        }
+        match self.editor().map(|e| e.focus) {
+            Some(Focus::Editor) => Context::Editor,
+            Some(Focus::Explorer) => Context::Explorer,
+            Some(Focus::Terminal) | None => Context::Terminal,
         }
     }
 
@@ -200,16 +288,20 @@ impl App {
         self.key_pane() == Some(pane)
     }
 
-    /// Whether a pane is currently drawn: in the active workspace's grid, or in its own window.
+    /// Whether a terminal is currently drawn: in its own window, or in the active workspace's grid
+    /// (Agents) or terminal panel (Editor).
     fn is_visible(&self, pane: PaneId) -> bool {
         self.window_of(pane).is_some()
-            || self.active_view().is_some_and(|ws| match ws.maximized() {
-                Some(max) => max == pane,
-                None => ws.handle(pane).is_some(),
+            || self.active_view().is_some_and(|ws| match ws.model.mode {
+                Mode::Agents => match ws.maximized() {
+                    Some(max) => max == pane,
+                    None => ws.handle(pane).is_some(),
+                },
+                Mode::Editor => ws.editor.as_ref().is_some_and(|e| e.show_terminal && e.terminal.id == pane),
             })
     }
 
-    fn default_grid(&self) -> GridSize {
+    pub(crate) fn default_grid(&self) -> GridSize {
         GridSize {
             cols: 80,
             rows: 24,
@@ -220,15 +312,24 @@ impl App {
 
     // ---- state changes -------------------------------------------------------------------
 
-    fn touch(&mut self) {
+    pub(crate) fn touch(&mut self) {
         self.dirty = true;
     }
 
+    /// Samples the system only while the profile is on screen: the drawer's section is open, or
+    /// the collapsed drawer's rail shows it. Also hands over the shells to total per workspace.
+    fn sync_system(&mut self) {
+        self.system.set_active(self.prefs.sidebar_collapsed || self.prefs.system_expanded);
+        self.system.track(self.sessions.pids());
+    }
+
     /// Runs `change`, then tells the terminals that lost and gained the keys.
-    fn refocus(&mut self, change: impl FnOnce(&mut Self)) {
+    pub(crate) fn refocus(&mut self, change: impl FnOnce(&mut Self)) {
         let before = self.key_pane();
         change(self);
         let after = self.key_pane();
+        // Even when the keys stayed put, you may have just come back to them.
+        self.acknowledge();
         if before == after {
             return;
         }
@@ -264,19 +365,26 @@ impl App {
                     session.set_focused(Some(pane) == key_pane);
                 }
             }
-            let rt = self.sessions.get_mut(pane).expect("just ensured");
-            rt.unseen_output = false;
-            rt.bell = false;
             // Hidden panes kept running without redrawing; their caches are stale.
-            rt.cache.clear();
+            self.sessions.get(pane).expect("just ensured").cache.clear();
         }
         self.touch();
         let closed: Vec<PaneId> = detached.into_iter().filter(|p| self.window_of(*p).is_none()).collect();
-        Task::batch(closed.into_iter().map(|p| self.open_window(p)).collect::<Vec<_>>())
+        let mut tasks: Vec<Task<Message>> = closed.into_iter().map(|p| self.open_window(p)).collect();
+        if self.active_view().is_some_and(|ws| ws.model.mode == Mode::Editor) {
+            tasks.push(self.start_editor());
+        }
+        Task::batch(tasks)
     }
 
-    /// Gives a pane the keys: focuses it in the grid, or makes its window the key window.
+    /// Gives a terminal the keys: focuses it in the grid or the editor, or makes its window the key
+    /// window.
     fn set_focus(&mut self, pane: PaneId) {
+        if self.window_of(pane).is_none() && self.editor().is_some_and(|e| e.terminal.id == pane) {
+            // The click that got here already took the keys from the code editor widget.
+            let _ = self.set_editor_focus(Focus::Terminal);
+            return;
+        }
         let window = self.window_of(pane).unwrap_or(self.main_window);
         let moved = window == self.main_window && self.focused_pane() != Some(pane);
         self.refocus(|app| {
@@ -349,9 +457,10 @@ impl App {
             }
         }
         let ws = self.workspaces.remove(index);
-        for pane in ws.all_pane_ids() {
+        for pane in ws.all_pane_ids().into_iter().chain([ws.editor_terminal()]) {
             self.sessions.remove(pane);
         }
+        self.fs.unwatch(id);
         if self.active == Some(id) {
             self.active = None;
             let next = self.workspaces.get(index.min(self.workspaces.len().saturating_sub(1))).map(WorkspaceView::id);
@@ -388,16 +497,15 @@ impl App {
     // ---- update --------------------------------------------------------------------------
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if self.dismiss_term_menu(&message) {
+            return Task::none();
+        }
         match message {
             Message::Term(pane, event) => return self.on_term_event(pane, event),
             Message::Terminal(pane, msg) => return self.on_terminal(pane, msg),
             Message::KeyPressed { window, key, modifiers, text } => return self.on_key(window, key, modifiers, text),
             Message::Action(action) => return self.perform(action),
-            Message::SelectWorkspace(id) => {
-                if self.active != Some(id) {
-                    return self.activate(id);
-                }
-            }
+            Message::SelectWorkspace(id) => return self.select_workspace(id),
             Message::MoveWorkspace(id, delta) => {
                 if let Some(from) = self.position(id) {
                     let to = from.saturating_add_signed(delta).min(self.workspaces.len() - 1);
@@ -408,7 +516,7 @@ impl App {
             }
             Message::EditWorkspace(id) => {
                 if let Some(ws) = self.workspaces.iter().find(|w| w.id() == id) {
-                    self.modal = Some(Modal::Editor(Editor::edit(&ws.model)));
+                    self.modal = Some(Modal::WorkspaceSheet(WorkspaceSheet::edit(&ws.model)));
                     return Task::batch([self.raise_main(), ui::modal::focus_first_field()]);
                 }
             }
@@ -468,6 +576,7 @@ impl App {
                 }
             }
             Message::Paste(None) => {}
+            Message::TermMenu(msg) => return self.on_term_menu(msg),
             Message::Usage(update) => self.usage.apply(update),
             Message::RefreshUsage => self.usage.refresh(),
             Message::RenewProfile(id) => self.usage.renew(id),
@@ -485,6 +594,16 @@ impl App {
                 self.prefs.usage_expanded = !self.prefs.usage_expanded;
                 self.touch();
             }
+            Message::System(sample) => {
+                self.system.apply(*sample);
+                // Terminals opened since the last reading are counted from the next one.
+                self.system.track(self.sessions.pids());
+            }
+            Message::ToggleSystem => {
+                self.prefs.system_expanded = !self.prefs.system_expanded;
+                self.sync_system();
+                self.touch();
+            }
             Message::SaveTick => {
                 self.saver.save(self.persisted());
                 self.dirty = false;
@@ -495,8 +614,25 @@ impl App {
                 }
             }
             Message::Window(msg) => return self.on_window(msg),
+            Message::SetMode(mode) => return self.set_mode(mode),
+            Message::Editor(msg) => return self.on_editor(msg),
+            Message::Explorer(msg) => return self.on_explorer(msg),
+            Message::Fs(id, paths) => self.on_fs(id, paths),
+            Message::Dev(msg) => return self.on_dev(msg),
+            Message::Note(event) => return self.on_note(event),
+            Message::ToggleNotifications => self.toggle_notifications(),
         }
         Task::none()
+    }
+
+    /// Quits, first asking about unsaved files.
+    pub(crate) fn request_quit(&mut self) -> Task<Message> {
+        let files = self.unsaved();
+        if files.is_empty() {
+            return self.quit();
+        }
+        self.modal = Some(Modal::Unsaved { files, then: ui::modal::Pending::Quit, error: None });
+        self.raise_main()
     }
 
     /// Saves and exits. A daemon doesn't exit when its windows close, so this is the only way out.
@@ -524,19 +660,17 @@ impl App {
             TermEvent::Wakeup => {
                 if visible {
                     rt.cache.clear();
-                } else {
-                    rt.unseen_output = true;
                 }
             }
             TermEvent::Title(title) => rt.title = Some(title).filter(|t| !t.trim().is_empty()),
             TermEvent::ResetTitle => rt.title = None,
-            TermEvent::Bell => {
-                if !visible {
-                    rt.bell = true;
-                }
-            }
+            TermEvent::Bell => return self.on_bell(pane),
+            TermEvent::Notify { title, body } => return self.on_notify(pane, title, body),
+            TermEvent::Busy => self.on_busy(pane),
+            TermEvent::Idle { worked } => return self.on_idle(pane, worked),
             TermEvent::Exited(code) => {
                 rt.exited = Some(code);
+                rt.working = false;
                 rt.cache.clear();
             }
             TermEvent::ClipboardStore(text) => return clipboard::write(text),
@@ -548,6 +682,7 @@ impl App {
         if let TermMsg::MouseDown { .. } = msg {
             self.set_focus(pane);
         }
+        let window = self.window_of(pane).unwrap_or(self.main_window);
         let Some(rt) = self.sessions.get_mut(pane) else { return Task::none() };
         let Some(session) = rt.session.as_mut() else { return Task::none() };
         // Shift overrides mouse reporting so you can always select text, as in other terminals.
@@ -555,7 +690,7 @@ impl App {
         let mut task = Task::none();
         match msg {
             TermMsg::Resize(size) => session.resize(size),
-            TermMsg::MouseDown { point, right_half, button, clicks, mods } => {
+            TermMsg::MouseDown { point, right_half, button, clicks, mods, menu_at } => {
                 if report(mods) {
                     session.report_mouse(MouseEvent { kind: MouseEventKind::Press(button), point, mods });
                 } else if button == MouseButton::Left {
@@ -567,6 +702,9 @@ impl App {
                     session.start_selection(kind, point, right_half);
                 } else if button == MouseButton::Middle {
                     task = clipboard::read_primary().map(Message::Paste);
+                } else {
+                    let can_copy = session.selection_text().is_some();
+                    self.term_menu = Some(TermMenu { window, pane, at: menu_at, can_copy });
                 }
             }
             TermMsg::MouseDrag { point, right_half, button, mods } => {
@@ -597,21 +735,38 @@ impl App {
         if window != self.key_window && (window == self.main_window || self.pane_windows.contains_key(&window)) {
             self.refocus(|app| app.key_window = window);
         }
-        if let Some(action) = keymap::action(&key, modifiers) {
+        let context = self.context();
+        if let Some(action) = keymap::action(&key, modifiers, context) {
             return self.perform(action);
         }
         // A sheet in the main window doesn't stop the detached terminals.
         if self.modal.is_some() && window == self.main_window {
             return match key {
-                Key::Named(iced::keyboard::key::Named::Escape) => self.on_modal(ModalMsg::Cancel),
-                Key::Named(iced::keyboard::key::Named::Enter) => self.on_modal(ModalMsg::Submit),
+                Key::Named(Named::Escape) => self.on_modal(ModalMsg::Cancel),
+                Key::Named(Named::Enter) => self.on_modal(ModalMsg::Submit),
                 _ => Task::none(),
             };
         }
+        if window == self.main_window && self.editor().is_some() {
+            if self.editor().is_some_and(|e| e.quick_open.is_some()) {
+                return self.editor_key(&key).unwrap_or_else(Task::none);
+            }
+            match context {
+                Context::Explorer => return self.explorer_key(&key),
+                Context::Editor => return self.editor_key(&key).unwrap_or_else(Task::none),
+                Context::Terminal => {}
+            }
+        }
         let Some(pane) = self.key_pane() else { return Task::none() };
         let Some(rt) = self.sessions.get(pane) else { return Task::none() };
+        if keymap::copies_selection(&key, modifiers)
+            && let Some(text) = rt.session.as_ref().and_then(|s| s.take_visible_selection())
+        {
+            rt.cache.clear();
+            return clipboard::write(text);
+        }
         if rt.exited.is_some() || rt.session.is_none() {
-            if key == Key::Named(iced::keyboard::key::Named::Enter) {
+            if key == Key::Named(Named::Enter) {
                 self.restart(pane);
             }
             return Task::none();
@@ -633,21 +788,46 @@ impl App {
             | Action::ToggleDetach
             | Action::Copy
             | Action::Paste
+            | Action::SelectAll
             | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::FontBigger
             | Action::FontSmaller
             | Action::FontReset => self.modal.is_none() || !in_main,
-            // Grid actions mean nothing in a detached terminal's window.
-            Action::Split(_) | Action::Focus(_) | Action::ToggleMaximize => self.modal.is_none() && in_main,
+            // Grid and editor actions mean nothing in a detached terminal's window.
+            Action::Split(_)
+            | Action::Focus(_)
+            | Action::ToggleMaximize
+            | Action::ToggleMode
+            | Action::ToggleTerminal
+            | Action::ToggleExplorer
+            | Action::QuickOpen
+            | Action::Save
+            | Action::Undo
+            | Action::Redo
+            | Action::Find
+            | Action::Replace
+            | Action::FindNext
+            | Action::FindPrev
+            | Action::ToggleComment
+            | Action::MoveLines { .. }
+            | Action::DuplicateLines { .. }
+            | Action::NextTab
+            | Action::PrevTab => self.modal.is_none() && in_main,
             _ => self.modal.is_none(),
         };
         if !allowed {
             return Task::none();
         }
+        if in_main
+            && self.modal.is_none()
+            && let Some(task) = self.perform_in_editor(action)
+        {
+            return task;
+        }
         match action {
             Action::NewWorkspace => {
-                self.modal = Some(Modal::Editor(Editor::new_workspace()));
+                self.modal = Some(Modal::WorkspaceSheet(WorkspaceSheet::new_workspace()));
                 return Task::batch([self.raise_main(), ui::modal::focus_first_field()]);
             }
             Action::EditWorkspace => {
@@ -671,6 +851,7 @@ impl App {
             }
             Action::ToggleSidebar => {
                 self.prefs.sidebar_collapsed = !self.prefs.sidebar_collapsed;
+                self.sync_system();
                 self.touch();
             }
             Action::Split(axis) => self.split(None, axis),
@@ -701,6 +882,11 @@ impl App {
                 }
             }
             Action::Paste => return clipboard::read().map(Message::Paste),
+            Action::SelectAll => {
+                if let Some(pane) = self.key_pane() {
+                    return self.select_all(pane);
+                }
+            }
             Action::FontBigger => self.set_font_size(self.prefs.font_size + 1.0),
             Action::FontSmaller => self.set_font_size(self.prefs.font_size - 1.0),
             Action::FontReset => self.set_font_size(UiPrefs::default().font_size),
@@ -719,7 +905,84 @@ impl App {
                 };
                 return self.raise_main();
             }
-            Action::Quit => return self.quit(),
+            Action::Quit => return self.request_quit(),
+            Action::NextAttention => return self.jump_to_next(),
+            Action::ToggleMode => {
+                let mode = self.active_view().map_or(Mode::Agents, |ws| ws.model.mode.toggled());
+                return self.set_mode(mode);
+            }
+            // Editor shortcuts outside Editor mode.
+            Action::ToggleTerminal
+            | Action::ToggleExplorer
+            | Action::QuickOpen
+            | Action::Save
+            | Action::Undo
+            | Action::Redo
+            | Action::Find
+            | Action::Replace
+            | Action::FindNext
+            | Action::FindPrev
+            | Action::ToggleComment
+            | Action::MoveLines { .. }
+            | Action::DuplicateLines { .. }
+            | Action::NextTab
+            | Action::PrevTab => {}
+        }
+        Task::none()
+    }
+
+    /// Selects a terminal's whole history and screen.
+    fn select_all(&self, pane: PaneId) -> Task<Message> {
+        let Some(rt) = self.sessions.get(pane) else { return Task::none() };
+        let Some(session) = &rt.session else { return Task::none() };
+        session.select_all();
+        rt.cache.clear();
+        // Like a selection made with the mouse, it becomes the primary selection.
+        session.selection_text().map_or_else(Task::none, clipboard::write_primary)
+    }
+
+    /// Closes the terminal menu on anything but its own messages and background updates: a key, a
+    /// click outside it, a layout or focus change. Returns whether the message is used up: Escape
+    /// only closes the menu (an agent would take it as "stop").
+    fn dismiss_term_menu(&mut self, message: &Message) -> bool {
+        let Some(menu) = &self.term_menu else { return false };
+        let keep = match message {
+            Message::TermMenu(_)
+            | Message::Term(..)
+            | Message::Paste(_)
+            | Message::Usage(_)
+            | Message::System(_)
+            | Message::SaveTick
+            | Message::CwdTick
+            | Message::Fs(..)
+            | Message::Note(_)
+            | Message::Dev(_) => true,
+            // The rest of the right-click that opened it.
+            Message::Terminal(_, TermMsg::MouseDrag { .. } | TermMsg::MouseUp { .. }) => true,
+            // Its window may report focus after the click.
+            Message::Window(WindowMsg::Focused(id)) => *id == menu.window,
+            _ => false,
+        };
+        if keep {
+            return false;
+        }
+        self.term_menu = None;
+        matches!(message, Message::KeyPressed { key: Key::Named(Named::Escape), .. })
+    }
+
+    fn on_term_menu(&mut self, msg: MenuMsg) -> Task<Message> {
+        let Some(menu) = self.term_menu.take() else { return Task::none() };
+        match msg {
+            MenuMsg::Copy => {
+                let text = self.sessions.get(menu.pane).and_then(|rt| rt.session.as_ref()?.selection_text());
+                if let Some(text) = text {
+                    return clipboard::write(text);
+                }
+            }
+            // The right-click gave the terminal the keys, so the paste lands in it.
+            MenuMsg::Paste => return clipboard::read().map(Message::Paste),
+            MenuMsg::SelectAll => return self.select_all(menu.pane),
+            MenuMsg::Close => {}
         }
         Task::none()
     }
@@ -728,7 +991,7 @@ impl App {
         match (&mut self.modal, msg) {
             (modal, ModalMsg::Cancel) => {
                 // The very first run has nothing behind the workspace sheet; keep it up.
-                if !self.workspaces.is_empty() || !matches!(modal, Some(Modal::Editor(_))) {
+                if !self.workspaces.is_empty() || !matches!(modal, Some(Modal::WorkspaceSheet(_))) {
                     self.modal = None;
                 }
             }
@@ -747,14 +1010,17 @@ impl App {
                 self.usage.remove(id);
                 self.touch();
             }
-            (Some(Modal::Editor(editor)), ModalMsg::Name(name)) => editor.name = name,
-            (Some(Modal::Editor(editor)), ModalMsg::Root(root)) => {
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Name(name)) => editor.name = name,
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Root(root)) => {
                 editor.root = root;
                 editor.error = None;
             }
-            (Some(Modal::Editor(editor)), ModalMsg::Preset(preset)) => editor.preset = preset,
-            (Some(Modal::Editor(editor)), ModalMsg::Browse) => {
-                let start = editor.resolved_root().filter(|p| p.is_dir()).unwrap_or_else(crate::sessions::home_dir);
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Preset(preset)) => editor.preset = preset,
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Browse) => {
+                let start = editor
+                    .resolved_root()
+                    .filter(|p| p.is_dir())
+                    .unwrap_or_else(|| crate::sessions::home_dir().to_path_buf());
                 return Task::perform(
                     async move {
                         rfd::AsyncFileDialog::new()
@@ -767,15 +1033,25 @@ impl App {
                     |path| Message::Modal(ModalMsg::Browsed(path)),
                 );
             }
-            (Some(Modal::Editor(editor)), ModalMsg::Browsed(Some(path))) => editor.set_root(path),
-            (Some(Modal::Editor(editor)), ModalMsg::Submit) => match editor.validate() {
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Browsed(Some(path))) => editor.set_root(path),
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Submit) => match editor.validate() {
                 Ok((name, root)) => {
                     let (target, preset) = (editor.target, editor.preset);
                     self.modal = None;
                     match target.and_then(|id| self.workspaces.iter_mut().find(|w| w.id() == id)) {
                         Some(ws) => {
                             ws.model.name = name;
+                            // A new folder means a new file tree; keep the editor only while it holds edits.
+                            if ws.model.root != root && ws.editor.as_ref().is_none_or(|e| e.dirty_paths().is_empty()) {
+                                ws.editor = None;
+                                ws.model.editor.expanded.clear();
+                            }
                             ws.model.root = root;
+                            let id = ws.id();
+                            if self.active == Some(id) && ws.model.mode == Mode::Editor {
+                                self.touch();
+                                return self.start_editor();
+                            }
                         }
                         None => {
                             let ws = WorkspaceView::new(Workspace::new(name, root, preset));
@@ -789,7 +1065,7 @@ impl App {
                 }
                 Err(error) => editor.error = Some(error),
             },
-            (Some(Modal::Editor(editor)), ModalMsg::Delete) => {
+            (Some(Modal::WorkspaceSheet(editor)), ModalMsg::Delete) => {
                 if let Some(id) = editor.target {
                     self.modal = Some(Modal::ConfirmDelete(id));
                 }
@@ -799,7 +1075,7 @@ impl App {
                 self.modal = None;
                 let closed = self.delete_workspace(id);
                 if self.workspaces.is_empty() {
-                    self.modal = Some(Modal::Editor(Editor::new_workspace()));
+                    self.modal = Some(Modal::WorkspaceSheet(WorkspaceSheet::new_workspace()));
                     return Task::batch([closed, ui::modal::focus_first_field()]);
                 }
                 return closed;
@@ -812,6 +1088,31 @@ impl App {
                 }
             }
             (Some(Modal::Shortcuts), ModalMsg::Submit) => self.modal = None,
+            (Some(Modal::Unsaved { files, then, .. }), ModalMsg::Submit) => {
+                let (files, then) = (files.clone(), then.clone());
+                let failed = self.save_files(&files);
+                if failed.is_empty() {
+                    self.modal = None;
+                    return self.finish_pending(then);
+                }
+                if let Some(Modal::Unsaved { error, .. }) = &mut self.modal {
+                    *error = Some(format!("Couldn't save {}", failed.join("; ")));
+                }
+            }
+            (Some(Modal::Unsaved { then, .. }), ModalMsg::Discard) => {
+                let then = then.clone();
+                self.modal = None;
+                return self.finish_pending(then);
+            }
+            (Some(Modal::ConfirmTrash { workspace, path }), ModalMsg::Submit) => {
+                let (workspace, path) = (*workspace, path.clone());
+                self.modal = None;
+                if self.active == Some(workspace) {
+                    self.trash(&path);
+                    self.sync_watches(workspace);
+                }
+                return self.set_editor_focus(Focus::Explorer);
+            }
             _ => {}
         }
         Task::none()
@@ -828,6 +1129,7 @@ fn on_runtime_event(event: iced::Event, status: event::Status, id: window::Id) -
         }
         iced::Event::Window(event) => match event {
             window::Event::Focused => Some(WindowMsg::Focused(id)),
+            window::Event::Unfocused => Some(WindowMsg::Unfocused(id)),
             window::Event::Resized(size) => Some(WindowMsg::Resized(id, size)),
             window::Event::CloseRequested => Some(WindowMsg::CloseRequested(id)),
             window::Event::Closed => Some(WindowMsg::Closed(id)),

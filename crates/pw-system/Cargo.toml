@@ -1,0 +1,19 @@
+[package]
+name = "pw-system"
+description = "Portal Workspaces system profile: light CPU, GPU, memory and network sampling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sysinfo = { version = "0.39", default-features = false, features = ["system", "network"] }
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nvml-wrapper = "0.13"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

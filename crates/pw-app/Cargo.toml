@@ -13,12 +13,21 @@ path = "src/main.rs"
 pw-model.workspace = true
 pw-term.workspace = true
 pw-usage.workspace = true
+pw-code.workspace = true
+pw-system.workspace = true
 jiff.workspace = true
 iced = { workspace = true, features = ["wgpu", "tiny-skia", "canvas", "tokio", "advanced", "svg", "x11", "wayland", "thread-pool", "crisp", "web-colors"] }
 rfd.workspace = true
+notify.workspace = true
+trash.workspace = true
+png.workspace = true
+notify-rust.workspace = true
 directories.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

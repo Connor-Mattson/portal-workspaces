@@ -1,9 +1,10 @@
-//! The main area: a header for the active workspace above its grid of terminals.
+//! The main area: a header for the active workspace (with the Agents / Editor switch) above its grid of
+//! terminals or its editor.
 
 use iced::widget::pane_grid::{self, PaneGrid};
 use iced::widget::{Space, button, center, column, container, row, stack, svg, text};
 use iced::{Alignment, Element, Fill, Length, Padding};
-use pw_model::{Axis, PaneId, Preset};
+use pw_model::{Axis, Mode, PaneId, Preset};
 
 use crate::app::{App, Message};
 use crate::fonts;
@@ -11,14 +12,21 @@ use crate::icons;
 use crate::keymap::Action;
 use crate::theme;
 use crate::ui::terminal::TerminalCanvas;
-use crate::ui::{icon_button, pane_label, preset_glyph, tildify, tip_for};
+use crate::ui::{icon_button, pane_label, preset_glyph, status, tildify, tip_for};
 use crate::workspace::WorkspaceView;
 
 const TITLE_HEIGHT: f32 = 28.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = match app.active_view() {
-        Some(ws) => column![header(ws), grid(app, ws)].into(),
+        Some(ws) => {
+            let body = match (ws.model.mode, &ws.editor) {
+                (Mode::Editor, Some(editor)) => crate::ui::editor::view(app, &ws.model.name, editor),
+                (Mode::Editor, None) => center(text("Opening…").size(theme::T_SM).color(theme::FG_3)).into(),
+                (Mode::Agents, _) => grid(app, ws),
+            };
+            column![header(app, ws), body].into()
+        }
         None => empty(
             "No workspace yet",
             "A workspace is one project: a folder and the terminals you keep open for it.",
@@ -29,7 +37,117 @@ pub fn view(app: &App) -> Element<'_, Message> {
     container(content).width(Fill).height(Fill).style(theme::workspace_area).into()
 }
 
-fn header<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
+fn header<'a>(app: &'a App, ws: &'a WorkspaceView) -> Element<'a, Message> {
+    let title = row![
+        text(&ws.model.name).size(theme::T_LG).font(fonts::UI_SEMIBOLD).color(theme::FG).wrapping(text::Wrapping::None),
+        row![
+            svg(icons::FOLDER.clone()).width(13).height(13).style(theme::icon(theme::FG_3)),
+            text(tildify(&ws.model.root))
+                .size(theme::T_SM)
+                .font(fonts::UI)
+                .color(theme::FG_3)
+                .wrapping(text::Wrapping::None),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(theme::S3)
+    .align_y(Alignment::Center);
+
+    let tools = match ws.model.mode {
+        Mode::Agents => agent_tools(ws),
+        Mode::Editor => editor_tools(ws),
+    };
+    // The switch sits in the middle, between two halves of equal width.
+    container(
+        row![
+            container(title).width(Fill).clip(true),
+            mode_switch(app, ws),
+            container(tools).width(Fill).align_right(Fill),
+        ]
+        .spacing(theme::S4)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([10.0, theme::S4]).left(theme::S6))
+    .width(Fill)
+    .into()
+}
+
+/// Agents / Editor. Each side shows a dot for what's happening on the other: agents that finished,
+/// need you or are working while editing, unsaved files while watching agents.
+fn mode_switch<'a>(app: &'a App, ws: &'a WorkspaceView) -> Element<'a, Message> {
+    let mode = ws.model.mode;
+    let activity = (mode == Mode::Editor).then(|| status::tint(&app.status_of(ws.all_pane_ids()))).flatten();
+    let unsaved = mode == Mode::Agents && ws.editor.as_ref().is_some_and(|e| !e.dirty_paths().is_empty());
+    let keys = if cfg!(target_os = "macos") { "⌘⇧M" } else { "Ctrl+Shift+M" };
+    let segment = |icon: &'static svg::Handle, label: &'static str, target: Mode, dot: Option<iced::Color>| {
+        let active = mode == target;
+        let mut content = row![
+            svg(icon.clone()).width(14).height(14).style(theme::icon(if active { theme::ACCENT } else { theme::FG_3 })),
+            text(label).size(theme::T_SM).font(if active { fonts::UI_SEMIBOLD } else { fonts::UI_MEDIUM }),
+        ]
+        .spacing(7)
+        .align_y(Alignment::Center);
+        if let Some(color) = dot {
+            content = content.push(container(Space::new().width(6).height(6)).style(theme::badge(color)));
+        }
+        button(content)
+            .padding([5, 12])
+            .style(theme::segment(active))
+            .on_press_maybe((!active).then_some(Message::SetMode(target)))
+    };
+    let switch = container(
+        row![
+            segment(&icons::LAYOUT_GRID, "Agents", Mode::Agents, activity),
+            segment(&icons::CODE, "Editor", Mode::Editor, unsaved.then_some(theme::FG_2)),
+        ]
+        .spacing(2),
+    )
+    .padding(2)
+    .style(theme::segmented);
+    iced::widget::tooltip(
+        switch,
+        container(text(format!("Switch modes  {keys}")).size(theme::T_SM).font(fonts::UI).color(theme::FG_2))
+            .padding([4, 8])
+            .style(theme::keycap),
+        iced::widget::tooltip::Position::Bottom,
+    )
+    .gap(6)
+    .into()
+}
+
+fn editor_tools<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
+    let Some(editor) = &ws.editor else { return Space::new().into() };
+    let action = |a| Some(Message::Action(a));
+    row![
+        icon_button(&icons::SEARCH, 15.0, "Quick open", action(Action::QuickOpen)),
+        icon_button(
+            &icons::FILES,
+            15.0,
+            if editor.show_explorer { "Hide file tree" } else { "Show file tree" },
+            action(Action::ToggleExplorer)
+        ),
+        icon_button(
+            &icons::SPLIT_RIGHT,
+            16.0,
+            "Split editor",
+            editor.can_split().then_some(Message::Action(Action::Split(Axis::Vertical)))
+        ),
+        icon_button(
+            &icons::PANEL_BOTTOM,
+            16.0,
+            if editor.show_terminal { "Hide terminal" } else { "Show terminal" },
+            action(Action::ToggleTerminal)
+        ),
+        container(Space::new().width(1).height(20)).style(theme::divider),
+        icon_button(&icons::PENCIL, 15.0, "Edit workspace", Some(Message::EditWorkspace(ws.id()))),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn agent_tools<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
     let current = ws.matching_preset();
     let presets = row(Preset::ALL.into_iter().map(|preset| {
         let active = current == Some(preset);
@@ -76,38 +194,15 @@ fn header<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
     .spacing(2)
     .align_y(Alignment::Center);
 
-    let title = row![
-        text(&ws.model.name).size(theme::T_LG).font(fonts::UI_SEMIBOLD).color(theme::FG),
-        row![
-            svg(icons::FOLDER.clone()).width(13).height(13).style(theme::icon(theme::FG_3)),
-            text(tildify(&ws.model.root)).size(theme::T_SM).font(fonts::UI).color(theme::FG_3),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    ]
-    .spacing(theme::S3)
-    .align_y(Alignment::Center);
-
     let count = text(format!("{} / {}", ws.pane_count(), pw_model::MAX_PANES))
         .size(theme::T_XS)
         .font(fonts::UI_MEDIUM)
         .color(theme::FG_3);
 
-    container(
-        row![
-            title,
-            Space::new().width(Fill),
-            count,
-            presets,
-            container(Space::new().width(1).height(20)).style(theme::divider),
-            actions
-        ]
+    row![count, presets, container(Space::new().width(1).height(20)).style(theme::divider), actions]
         .spacing(theme::S3)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding::from([10.0, theme::S4]).left(theme::S6))
-    .width(Fill)
-    .into()
+        .align_y(Alignment::Center)
+        .into()
 }
 
 fn preset_tip(preset: Preset) -> &'static str {
@@ -196,17 +291,24 @@ pub fn pane_title<'a>(app: &'a App, pane: PaneId, focused: bool) -> Element<'a, 
     let exited = rt.is_some_and(|rt| rt.exited.is_some() || rt.session.is_none());
     let label = rt.map(pane_label).unwrap_or_default();
 
-    let status = container(Space::new().width(6).height(6)).style(theme::badge(if exited {
-        theme::WARN
-    } else if focused {
-        theme::ACCENT
-    } else {
-        theme::LINE_STRONG
-    }));
+    let wants = rt.and_then(|rt| rt.attention.as_ref()).map(|a| a.kind);
+    let working = rt.is_some_and(|rt| rt.working);
+    let dot = match (exited, wants) {
+        (true, _) => theme::WARN,
+        (false, Some(kind)) => status::color(kind),
+        _ if focused => theme::ACCENT,
+        _ if working => theme::WORKING,
+        _ => theme::LINE_STRONG,
+    };
+    let dot = container(Space::new().width(6).height(6)).style(theme::badge(dot));
 
-    let mut title = row![status, text(label).size(theme::T_SM).font(fonts::UI_MEDIUM).wrapping(text::Wrapping::None)]
+    let mut title = row![dot, text(label).size(theme::T_SM).font(fonts::UI_MEDIUM).wrapping(text::Wrapping::None)]
         .spacing(theme::S2)
         .align_y(Alignment::Center);
+    // You haven't been to it since it finished or asked: say so where it's easy to spot in a full grid.
+    if let Some(kind) = wants {
+        title = title.push(status::chip(kind));
+    }
     // Shells usually put the cwd in the title already; only add it when they don't.
     if rt.is_some_and(|rt| rt.title.as_ref().is_some_and(|t| !t.contains(cwd.as_str()))) {
         title =

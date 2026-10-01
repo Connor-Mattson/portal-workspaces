@@ -5,14 +5,18 @@
 //! resizes, gets [`TermEvent`]s through a callback, and draws [`Snapshot`]s. No alacritty types
 //! leak out of this crate, so the renderer and the emulator can change independently.
 
+mod activity;
 pub mod color;
 pub mod cwd;
 mod events;
 pub mod input;
 pub mod mouse;
+pub mod notify;
 pub mod session;
 pub mod snapshot;
+mod tap;
 
+pub use activity::ActivityConfig;
 pub use color::{Palette, Rgb};
 pub use events::TermEvent;
 pub use input::{Key, KeyInput, Mods, NamedKey};

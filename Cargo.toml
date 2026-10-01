@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pw-model", "crates/pw-term", "crates/pw-usage", "crates/pw-app"]
+members = ["crates/pw-model", "crates/pw-term", "crates/pw-usage", "crates/pw-code", "crates/pw-system", "crates/pw-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,8 @@ rust-version = "1.88"
 pw-model = { path = "crates/pw-model" }
 pw-term = { path = "crates/pw-term" }
 pw-usage = { path = "crates/pw-usage" }
+pw-code = { path = "crates/pw-code" }
+pw-system = { path = "crates/pw-system" }
 iced = { version = "0.14", default-features = false }
 alacritty_terminal = "0.26"
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +29,14 @@ ureq = "3"
 jiff = "0.2"
 sha2 = "0.10"
 dbus-secret-service = "4"
+two-face = { version = "0.4", default-features = false, features = ["syntect-onig"] }
+syntect = { version = "5", default-features = false, features = ["parsing", "regex-onig"] }
+ignore = "0.4"
+nucleo-matcher = "0.3"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+trash = "5"
+png = "0.18"
+notify-rust = "4"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

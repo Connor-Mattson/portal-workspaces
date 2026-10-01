@@ -7,7 +7,7 @@ use crate::usage::UsageProfile;
 use crate::workspace::Workspace;
 
 /// Bump when the on-disk shape changes, and teach [`crate::store::migrate`] the old shape.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PersistedState {
@@ -42,6 +42,7 @@ impl PersistedState {
             self.active = self.workspaces.first().map(|w| w.id);
         }
         self.ui.font_size = self.ui.font_size.clamp(UiPrefs::MIN_FONT, UiPrefs::MAX_FONT);
+        self.ui.editor_font_size = self.ui.editor_font_size.clamp(UiPrefs::MIN_FONT, UiPrefs::MAX_FONT);
         let mut seen = std::collections::HashSet::new();
         self.usage_profiles.retain(|p| seen.insert(p.id));
         self
@@ -58,6 +59,12 @@ pub struct UiPrefs {
     pub usage_expanded: bool,
     /// Size of the last resized detached terminal's window; new ones open at it (added in schema 3).
     pub terminal_window: Option<WindowGeometry>,
+    /// The code editor's font size (added in schema 4).
+    pub editor_font_size: f32,
+    /// The drawer's system profile is open (added in schema 5). Closed, it isn't sampled.
+    pub system_expanded: bool,
+    /// Desktop notifications when a terminal needs you while the app isn't focused (added in schema 6).
+    pub notifications: bool,
 }
 
 impl UiPrefs {
@@ -67,7 +74,16 @@ impl UiPrefs {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        Self { sidebar_collapsed: false, font_size: 13.0, window: None, usage_expanded: true, terminal_window: None }
+        Self {
+            sidebar_collapsed: false,
+            font_size: 13.0,
+            window: None,
+            usage_expanded: true,
+            terminal_window: None,
+            editor_font_size: 14.0,
+            system_expanded: true,
+            notifications: true,
+        }
     }
 }
 

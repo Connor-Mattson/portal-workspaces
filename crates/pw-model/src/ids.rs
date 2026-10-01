@@ -45,3 +45,7 @@ id_type!(
     /// Identifies a tracked AI-usage profile (one account of one provider).
     ProfileId
 );
+id_type!(
+    /// Identifies an editor group (one tab strip and its code view) in Editor mode.
+    GroupId
+);

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::editor::{EditorSession, Mode};
 use crate::ids::{PaneId, WorkspaceId};
 use crate::layout::{LayoutNode, MAX_PANES, Preset};
 
@@ -30,6 +31,12 @@ pub struct Workspace {
     /// toward [`MAX_PANES`].
     #[serde(default)]
     pub detached: Vec<PaneId>,
+    /// Agent terminals or the code editor (added in schema 4).
+    #[serde(default)]
+    pub mode: Mode,
+    /// The code editor's tabs, groups, file tree and terminal (added in schema 4).
+    #[serde(default)]
+    pub editor: EditorSession,
 }
 
 impl Workspace {
@@ -45,6 +52,8 @@ impl Workspace {
             root,
             panes,
             detached: Vec::new(),
+            mode: Mode::default(),
+            editor: EditorSession::default(),
         }
     }
 
@@ -76,6 +85,10 @@ impl Workspace {
             self.focused = live.first().copied();
         }
         self.layout = layout;
+        self.editor = std::mem::take(&mut self.editor).repaired();
+        if self.panes.contains_key(&self.editor.terminal.id) {
+            self.editor.terminal.id = PaneId::new();
+        }
         self
     }
 }
@@ -121,6 +134,15 @@ mod tests {
         let ws = ws.repaired();
         assert_eq!(ws.pane_count(), MAX_PANES);
         assert!(ws.panes.contains_key(&first));
+    }
+
+    #[test]
+    fn repair_keeps_the_editor_terminal_apart_from_agent_panes() {
+        let mut ws = Workspace::new("demo", "/root".into(), Preset::Single);
+        ws.editor.terminal.id = ws.focused.unwrap();
+        let ws = ws.repaired();
+        assert!(!ws.panes.contains_key(&ws.editor.terminal.id));
+        assert_eq!(ws.pane_count(), 1);
     }
 
     #[test]

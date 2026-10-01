@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use iced::Subscription;
 use iced::futures::channel::mpsc::UnboundedSender;
@@ -13,6 +14,7 @@ use iced::widget::canvas;
 use pw_model::PaneId;
 use pw_term::{GridSize, Session, SessionConfig, TermEvent};
 
+use crate::attention::Attention;
 use crate::inbox::{self, Inbox};
 
 /// Everything the UI tracks about one pane's terminal.
@@ -25,10 +27,10 @@ pub struct PaneRuntime {
     pub exited: Option<Option<i32>>,
     /// Last known working directory: where it started, then refreshed from the live shell.
     pub cwd: PathBuf,
-    /// Output arrived while the pane wasn't on screen.
-    pub unseen_output: bool,
-    /// The program rang the bell while the pane wasn't on screen.
-    pub bell: bool,
+    /// It has been printing steadily (an agent at work, a build); see `pw_term::ActivityConfig`.
+    pub working: bool,
+    /// It finished or needs you, and you haven't been to it since (see `attention`).
+    pub attention: Option<Attention>,
     /// Drawn geometry; cleared only when something visible changed.
     pub cache: canvas::Cache,
 }
@@ -73,7 +75,7 @@ impl Sessions {
     /// Starts a shell for `id` in `cwd`, falling back to `fallback` and then `$HOME` if `cwd` is
     /// gone. Replaces any previous session for the pane (used for restart).
     pub fn spawn(&mut self, id: PaneId, cwd: &Path, fallback: &Path, size: GridSize) {
-        let cwd = [cwd, fallback].into_iter().find(|p| p.is_dir()).map(Path::to_path_buf).unwrap_or_else(home_dir);
+        let cwd = [cwd, fallback].into_iter().find(|p| p.is_dir()).unwrap_or(home_dir()).to_path_buf();
         let tx = self.tx.clone();
         let result = Session::spawn(SessionConfig::new(cwd.clone(), size), move |event| {
             let _ = tx.unbounded_send((id, event));
@@ -93,8 +95,8 @@ impl Sessions {
                 title: None,
                 exited: None,
                 cwd,
-                unseen_output: false,
-                bell: false,
+                working: false,
+                attention: None,
                 cache: canvas::Cache::new(),
             },
         );
@@ -119,6 +121,15 @@ impl Sessions {
         changed
     }
 
+    /// The live shells' process ids, whose trees the system profile totals per workspace.
+    pub fn pids(&self) -> Vec<u32> {
+        self.panes
+            .values()
+            .filter(|rt| rt.exited.is_none())
+            .filter_map(|rt| rt.session.as_ref().map(Session::pid))
+            .collect()
+    }
+
     pub fn clear_all_caches(&self) {
         for rt in self.panes.values() {
             rt.cache.clear();
@@ -126,6 +137,11 @@ impl Sessions {
     }
 }
 
-pub fn home_dir() -> PathBuf {
-    directories::UserDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from("/"))
+/// The user's home directory, resolved once. Views tildify paths on every rebuild, so this must not touch the disk:
+/// `BaseDirs` reads `$HOME` (or the password database), where `UserDirs` would parse `user-dirs.dirs` each time.
+pub fn home_dir() -> &'static Path {
+    static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
+        directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from("/"))
+    });
+    &HOME
 }

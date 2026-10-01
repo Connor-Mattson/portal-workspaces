@@ -11,10 +11,15 @@ its own CLI agents (Claude Code, Codex, …). It's a companion to [Science Porta
   to rearrange. One-click presets cover 1, 2, 3, 4, 6 and 8 terminals.
 - **Detach any terminal** into its own window, e.g. to keep an agent on another screen. It stays open while you
   switch workspaces. Closing its window docks it back into the grid.
-- **Nothing stops when you switch.** Terminals in other workspaces keep running. The drawer shows a dot when
-  one of them printed something, and an amber dot when it rang the bell (e.g. an agent finished).
+- **Editor mode.** Flip any workspace from its agents to a light code editor (file tree, tabs, split groups and a
+  terminal) to read and touch up what the agents wrote, then flip back. The agents keep running.
+- **Nothing stops when you switch, and you hear when it's your turn.** Terminals in other workspaces keep
+  running. When an agent finishes or needs your input, its workspace says so in the drawer, and Ctrl+Shift+I
+  takes you to it. A desktop notification tells you if you're in another app (see
+  [Knowing when an agent needs you](#knowing-when-an-agent-needs-you)).
 - **Restores your setup.** On relaunch every workspace comes back with the same layout, split sizes, detached
-  windows and each terminal's last working directory, with fresh shells. Running processes are not restored.
+  windows, each terminal's last working directory and the editor's open files, with fresh shells. Running
+  processes and unsaved edits are not restored.
 
 Written in Rust with [Iced](https://iced.rs) (GPU rendering via wgpu). `alacritty_terminal` handles terminal
 emulation. There's no web runtime and no garbage collector.
@@ -44,6 +49,8 @@ The first launch asks for a project folder. After that:
 | Edit workspace (rename, change folder, delete) | Ctrl+Shift+, | ⌘, |
 | Switch to workspace 1–9 | Ctrl+Shift+1…9 | ⌘1…9 |
 | Previous / next workspace | Ctrl+Shift+[ / ] | ⌘[ / ] |
+| Go to the terminal that needs you | Ctrl+Shift+I | ⌘I |
+| Agents ⇄ Editor | Ctrl+Shift+M | ⌘⇧M |
 | Toggle drawer | Ctrl+Shift+B | ⌘B |
 | Split right / down | Ctrl+Shift+D / Ctrl+Shift+E | ⌘D / ⌘⇧D |
 | Close terminal | Ctrl+Shift+W | ⌘W |
@@ -51,21 +58,108 @@ The first launch asks for a project folder. After that:
 | Maximize terminal | Ctrl+Shift+Enter | ⌘Enter |
 | Detach terminal into its own window / dock it back | Ctrl+Shift+O | ⌘O |
 | Copy / paste | Ctrl+Shift+C / V | ⌘C / V |
+| Copy the selection (with nothing selected: interrupt, as always) | Ctrl+C | — |
+| Select all | Ctrl+Shift+A | ⌘A |
 | Font size | Ctrl+Shift+= / - / 0 | ⌘= / - / 0 |
 | Scroll history | Shift+PgUp / PgDn | Shift+PgUp / PgDn |
 | All shortcuts | Ctrl+Shift+/ | ⌘/ |
 
-On Linux, shortcuts use Ctrl+Shift so that plain Ctrl-keys (Ctrl+C, Ctrl+D, Ctrl+W, …) always reach the
-shell. Mouse:
+On Linux, shortcuts use Ctrl+Shift so that plain Ctrl-keys (Ctrl+D, Ctrl+W, …) reach the shell. Plain Ctrl
+shortcuts exist only in Editor mode, and only while the code or the file tree has the keys (see below). The one
+exception is Ctrl+C: while text is selected on screen it copies it and clears the selection, so the next Ctrl+C
+interrupts as usual. With nothing selected it always reaches the program, so it can't keep you from stopping an
+agent. Mouse:
 - Drag selects text (and copies it to the primary selection on Linux). Double-click selects a word, triple-click
   a line.
+- Right-click opens a menu: Copy, Paste, Select all.
 - Middle-click pastes the primary selection.
 - The wheel scrolls history.
-- Programs that use the mouse (vim, htop) get mouse events. Hold Shift to select text anyway.
+- Programs that use the mouse (vim, htop) get mouse events. Hold Shift to select text or open the menu anyway.
+
+Pastes into programs that ask for bracketed paste (shells, Claude Code, Codex) arrive as one paste. Escape
+characters and Ctrl+C are removed from them, so pasted text can't end the paste early and run as typed keys.
 
 New terminals open in the folder of the terminal they were split from. Shells get
 `TERM=xterm-256color`, `COLORTERM=truecolor` and `TERM_PROGRAM=PortalWorkspaces`. The kitty keyboard
 protocol is supported, so Shift+Enter works in Claude Code.
+
+## Editor mode
+
+The **Agents / Editor** switch at the top of a workspace (Ctrl+Shift+M) flips it to a code editor on the same
+folder. Each workspace remembers its mode.
+
+- **File tree:** folders load as you open them. Files your `.gitignore` excludes (`target/`, `node_modules/`) are
+  dimmed, not hidden. Hover a row to rename or delete it; deleting moves it to the Trash. Arrows, Enter, F2 and
+  Delete work when the tree has the keys.
+- **Tabs:** one click opens a file as a *preview* (dimmed name), which the next click replaces. Double-click or
+  start typing to keep it. Tabs with the same name show the folders that tell them apart.
+- **Split groups:** up to 4, side by side or stacked. The same file can be open in two groups, each with its own
+  cursor, and edits show in both.
+- **Editing:** syntax highlighting for most languages (files over 50,000 lines show as plain text), bracket
+  matching, auto-closing pairs, comment toggling, moving and duplicating lines, and the file's own indentation
+  (tabs, or 2 or 4 spaces). Find and replace, and quick open (fuzzy file search, honouring `.gitignore`).
+- **Terminal:** one shell of its own under the editor (Ctrl+Shift+J). It doesn't count toward the 8 terminals.
+- **Saving is explicit.** Nothing is saved until you press Ctrl+S. Closing a tab, deleting a workspace or quitting
+  with unsaved edits asks first. A pencil in the drawer marks workspaces with unsaved edits.
+- **Agents editing your files:** a file you haven't touched reloads in place when it changes on disk. If you have
+  unsaved edits, a banner lets you keep yours or take the disk version; nothing is overwritten without asking.
+
+| | Linux | macOS |
+|---|---|---|
+| Quick open | Ctrl+P (or Ctrl+Shift+P) | ⌘P |
+| Save | Ctrl+S | ⌘S |
+| Toggle terminal / file tree | Ctrl+Shift+J / T | ⌘J / T |
+| Split editor | Ctrl+\ | ⌘\ |
+| Close tab | Ctrl+W | ⌘W |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab | Ctrl+Tab / Ctrl+Shift+Tab |
+| Find / replace | Ctrl+F / Ctrl+H | ⌘F / ⌘⌥F |
+| Next / previous match | F3 / Shift+F3 | F3 / Shift+F3 |
+| Undo / redo | Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) | ⌘Z / ⌘⇧Z |
+| Comment lines | Ctrl+/ | ⌘/ |
+| Move / duplicate lines | Alt+↑↓ / Alt+Shift+↑↓ | ⌥↑↓ / ⌥⇧↑↓ |
+
+The Ctrl shortcuts in this table work while the code or the file tree has the keys. In the editor's terminal,
+Ctrl-keys go to the shell as usual.
+
+## Knowing when an agent needs you
+
+Each terminal you aren't looking at can be in one of three states:
+
+- **Working** (a dim dot): it has been printing steadily for a few seconds, e.g. an agent's spinner or a build.
+- **Finished** (green): it was working and went quiet, or the agent said its turn is complete.
+- **Needs input** (amber, haloed): the agent asked for permission, approval or an answer, or the program rang
+  the bell.
+
+They show up in several places:
+
+- **The drawer:** the dot on the workspace's row. "Needs input" and "Finished" also replace the folder path,
+  followed by what the agent said; hover to read all of it.
+- **The collapsed drawer:** the dot on the workspace's letters.
+- **The terminal's title bar:** a chip, so you can spot the right pane in a full grid.
+- **The Agents switch:** a dot while you're in Editor mode.
+- **The window title:** a count, e.g. "(2)".
+
+To get there:
+
+- **Ctrl+Shift+I** goes to the terminal that has needed you longest, or else the one that finished first. It
+  switches workspace and mode, and un-maximizes or raises a window if needed.
+- **Clicking the workspace** goes straight to that terminal.
+- A terminal's state clears as soon as it has the keys.
+
+When the app isn't focused, the first change also posts a desktop notification and flags the app in the taskbar
+or dock. On Linux, clicking the notification takes you to the terminal. The bell at the bottom of the drawer
+turns notifications off.
+
+Agents tell terminals about this in different ways:
+
+- **Claude Code** only sends notifications to terminals it recognizes. Without them, "Finished" comes from the
+  output going quiet, which also covers permission prompts. For the exact message, set Claude Code's
+  notification channel to iTerm2: `/config` → Notifications → `iterm2`. That stores
+  `"preferredNotifChannel": "iterm2"` in its global config.
+- **Codex** rings the bell when it needs you. For its message, set `tui.notification_method = "osc9"` in
+  `~/.codex/config.toml`.
+- **Any program** can use OSC 9, OSC 777 or OSC 99 notifications, or the bell, e.g.
+  `printf '\033]9;Deploy finished\007'`.
 
 ## Usage limits
 
@@ -84,18 +178,41 @@ Antigravity are detected automatically. For another setup, paste the alias you s
   **idle** and has a **Renew** button that tries again right away. If that doesn't work either, run the CLI once
   yourself.
 
+## System profile
+
+Below the usage limits, four rings show **CPU**, **GPU**, **RAM** and **network**, sampled every 5 seconds. A ring
+fills amber from 70% and red from 90%. Hover one for its card:
+
+- **The last 5 minutes** as a sparkline, with the peak.
+- **By workspace:** how much CPU, memory or GPU memory each workspace's terminals are using, counting every
+  process they started (agents, builds, dev servers).
+- **Top programs:** the busiest programs on the machine. Processes of the same name are counted together
+  (`chrome ×73`). A program running in one of your workspaces says which one.
+- **Details:** load average, swap, GPU temperature and power, and each network link's speed and traffic.
+
+GPU numbers come from NVIDIA's driver (NVML) or AMD's on Linux, and from the GPU driver's own statistics on
+macOS. Intel GPUs on Linux don't report their load without root, so their ring stays empty. Network traffic
+counts only real interfaces (Ethernet, Wi-Fi), not loopback, containers or VPN tunnels. The ring shows how full
+the link is when its speed is known, otherwise traffic relative to the recent peak.
+
+Sampling stops while the section is closed. In the collapsed drawer the rings shrink to a 2×2 tile.
+
 ## Where state lives
 
-`~/.config/portal-workspaces/state.json` on Linux, `~/Library/Application Support/Portal Workspaces/state.json`
+`~/.config/portalworkspaces/state.json` on Linux, `~/Library/Application Support/Portal Workspaces/state.json`
 on macOS. Set `PORTAL_WORKSPACES_STATE=/path/to/file.json` to use another file (handy for trying things out).
 If the file can't be read, it is moved aside as `state.json.bak-<time>` and the app starts empty.
 
 ## Performance
 
-- **Idle:** no timers except a 10-second cwd check and the 2-minute usage check (on its own thread). An idle
-  app uses about 0% CPU.
+- **Idle:** no timers except a 10-second cwd check, the 2-minute usage check and the 5-second system sample
+  (each on its own thread). While a terminal is working, one thread waits until it could have gone quiet. It
+  wakes the app only when that happens. An idle app uses about 0% CPU. A system sample reads about 600 processes in about
+  9 ms (about 0.2% of one core), and none are taken while the section is closed.
 - **Output:** terminals redraw only when their output changes, and at most once per frame. Hidden workspaces
-  never draw.
+  never draw, and neither does the mode a workspace isn't showing.
+- **Files:** the editor watches only the folders it shows (no recursive watches), and changes arrive as events,
+  not by polling.
 - **Measured** on Ubuntu 22.04 with an RTX 3090 (release build):
   - The window appears about 70 ms after launch.
   - With four live terminals (one running `top`), the app uses about 0.4% CPU.

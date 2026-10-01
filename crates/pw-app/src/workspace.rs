@@ -1,9 +1,12 @@
-//! A workspace as the UI holds it: the model plus iced's live pane-grid state.
+//! A workspace as the UI holds it: the model plus iced's live pane-grid state, and its editor once
+//! it has been shown in Editor mode.
 
-use iced::widget::pane_grid::{self, Configuration, Node, Pane};
+use iced::widget::pane_grid::{self, Pane};
 use pw_model::{Axis, LayoutFull, LayoutNode, MAX_PANES, PaneId, Preset, Workspace};
 
+use crate::editor::EditorView;
 use crate::keymap::Direction;
+use crate::split::{self, to_iced_axis};
 
 pub struct WorkspaceView {
     /// Name, root and ids. Its `layout`, `panes` and `focused` are refreshed by [`Self::to_model`].
@@ -16,12 +19,14 @@ pub struct WorkspaceView {
     pub detached: Vec<PaneId>,
     /// Shells are started the first time the workspace is shown, not at app launch.
     pub spawned: bool,
+    /// The code editor, built the first time the workspace is shown in Editor mode.
+    pub editor: Option<EditorView>,
 }
 
 impl WorkspaceView {
     pub fn new(model: Workspace) -> Self {
-        let grid = model.layout.as_ref().map(|l| pane_grid::State::with_configuration(to_configuration(l)));
-        Self { focused: model.focused, detached: model.detached.clone(), grid, model, spawned: false }
+        let grid = model.layout.as_ref().map(split::grid);
+        Self { focused: model.focused, detached: model.detached.clone(), grid, model, spawned: false, editor: None }
     }
 
     pub fn id(&self) -> pw_model::WorkspaceId {
@@ -59,18 +64,27 @@ impl WorkspaceView {
         preset.pane_count() + self.detached.len() <= MAX_PANES
     }
 
+    /// The editor's terminal (its session exists once the editor showed it).
+    pub fn editor_terminal(&self) -> PaneId {
+        self.model.editor.terminal.id
+    }
+
+    /// Whether a terminal belongs to this workspace: in the grid, detached, or the editor's.
+    pub fn owns(&self, pane: PaneId) -> bool {
+        self.is_detached(pane) || self.handle(pane).is_some() || self.editor_terminal() == pane
+    }
+
     pub fn is_detached(&self, id: PaneId) -> bool {
         self.detached.contains(&id)
     }
 
     /// The pane-grid handle for a pane id.
     pub fn handle(&self, id: PaneId) -> Option<Pane> {
-        self.grid.as_ref()?.iter().find(|(_, p)| **p == id).map(|(h, _)| *h)
+        split::handle(self.grid.as_ref()?, &id)
     }
 
     pub fn layout(&self) -> Option<LayoutNode> {
-        let grid = self.grid.as_ref()?;
-        Some(from_node(grid.layout(), grid))
+        self.grid.as_ref().map(split::tree)
     }
 
     /// Splits the focused pane (or `target`) and focuses the new one.
@@ -143,7 +157,7 @@ impl WorkspaceView {
         let created: Vec<PaneId> = (ids.len()..want).map(|_| PaneId::new()).collect();
         ids.extend(&created);
         let dropped = current.iter().copied().skip(want).collect();
-        self.grid = Some(pane_grid::State::with_configuration(to_configuration(&preset.build(&ids))));
+        self.grid = Some(split::grid(&preset.build(&ids)));
         if !self.focused.is_some_and(|f| ids.contains(&f)) {
             self.focused = ids.first().copied();
         }
@@ -158,15 +172,7 @@ impl WorkspaceView {
     }
 
     pub fn adjacent(&self, direction: Direction) -> Option<PaneId> {
-        let grid = self.grid.as_ref()?;
-        let from = self.handle(self.focused?)?;
-        let direction = match direction {
-            Direction::Left => pane_grid::Direction::Left,
-            Direction::Right => pane_grid::Direction::Right,
-            Direction::Up => pane_grid::Direction::Up,
-            Direction::Down => pane_grid::Direction::Down,
-        };
-        grid.adjacent(from, direction).and_then(|h| grid.get(h).copied())
+        split::adjacent(self.grid.as_ref()?, &self.focused?, direction)
     }
 
     pub fn toggle_maximize(&mut self, id: PaneId) {
@@ -184,9 +190,12 @@ impl WorkspaceView {
         grid.maximized().and_then(|h| grid.get(h).copied())
     }
 
-    /// The persisted form. `cwd_of` supplies each pane's current directory.
+    /// The persisted form. `cwd_of` supplies each terminal's current directory.
     pub fn to_model(&self, cwd_of: impl Fn(PaneId) -> Option<std::path::PathBuf>) -> Workspace {
         let mut model = self.model.clone();
+        if let Some(editor) = &self.editor {
+            model.editor = editor.to_session(cwd_of(editor.terminal.id));
+        }
         model.layout = self.layout();
         model.focused = self.focused;
         model.detached = self.detached.clone();
@@ -211,40 +220,6 @@ fn same_shape(a: &LayoutNode, b: &LayoutNode) -> bool {
             xa == xb && same_shape(aa, ba) && same_shape(ab, bb)
         }
         _ => false,
-    }
-}
-
-fn to_iced_axis(axis: Axis) -> pane_grid::Axis {
-    match axis {
-        Axis::Horizontal => pane_grid::Axis::Horizontal,
-        Axis::Vertical => pane_grid::Axis::Vertical,
-    }
-}
-
-fn to_configuration(node: &LayoutNode) -> Configuration<PaneId> {
-    match node {
-        LayoutNode::Pane { id } => Configuration::Pane(*id),
-        LayoutNode::Split { axis, ratio, a, b } => Configuration::Split {
-            axis: to_iced_axis(*axis),
-            ratio: *ratio,
-            a: Box::new(to_configuration(a)),
-            b: Box::new(to_configuration(b)),
-        },
-    }
-}
-
-fn from_node(node: &Node, grid: &pane_grid::State<PaneId>) -> LayoutNode {
-    match node {
-        Node::Pane(handle) => LayoutNode::pane(*grid.get(*handle).expect("layout pane has state")),
-        Node::Split { axis, ratio, a, b, .. } => LayoutNode::split(
-            match axis {
-                pane_grid::Axis::Horizontal => Axis::Horizontal,
-                pane_grid::Axis::Vertical => Axis::Vertical,
-            },
-            *ratio,
-            from_node(a, grid),
-            from_node(b, grid),
-        ),
     }
 }
 

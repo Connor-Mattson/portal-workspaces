@@ -8,41 +8,8 @@ use crate::fonts;
 use crate::icons;
 use crate::keymap::Action;
 use crate::theme;
-use crate::ui::{icon_button, tildify, usage};
+use crate::ui::{icon_button, status, system, tildify, usage};
 use crate::workspace::WorkspaceView;
-
-#[derive(Clone, Copy)]
-enum Activity {
-    None,
-    Output,
-    Bell,
-}
-
-fn activity(app: &App, ws: &WorkspaceView) -> Activity {
-    let panes = ws.pane_ids();
-    let rts = panes.iter().filter_map(|p| app.sessions.get(*p));
-    let (mut output, mut bell) = (false, false);
-    for rt in rts {
-        output |= rt.unseen_output;
-        bell |= rt.bell;
-    }
-    if bell {
-        Activity::Bell
-    } else if output {
-        Activity::Output
-    } else {
-        Activity::None
-    }
-}
-
-fn dot<'a>(activity: Activity) -> Element<'a, Message> {
-    let color = match activity {
-        Activity::None => return Space::new().width(8).height(8).into(),
-        Activity::Output => theme::ACCENT,
-        Activity::Bell => theme::WARN,
-    };
-    container(Space::new().width(8).height(8)).style(theme::badge(color)).into()
-}
 
 fn monogram(name: &str, active: bool) -> Element<'_, Message> {
     let letters: String = name
@@ -101,8 +68,15 @@ fn drawer(app: &App) -> Element<'_, Message> {
         .style(theme::ghost_button)
         .on_press(Message::Action(Action::ShowShortcuts)),
         Space::new().width(Fill),
+        icon_button(
+            if app.prefs.notifications { &icons::BELL } else { &icons::BELL_OFF },
+            15.0,
+            if app.prefs.notifications { "Desktop notifications: on" } else { "Desktop notifications: off" },
+            Some(Message::ToggleNotifications),
+        ),
         text(concat!("v", env!("CARGO_PKG_VERSION"))).size(theme::T_XS).font(fonts::UI).color(theme::LINE_STRONG),
     ]
+    .spacing(theme::S1)
     .align_y(Alignment::Center);
 
     container(
@@ -111,6 +85,7 @@ fn drawer(app: &App) -> Element<'_, Message> {
             container(header).padding([0.0, theme::S3]),
             scrollable(container(items).padding([theme::S1, theme::S2])).height(Fill).style(theme::scroller),
             container(usage::section(app)).padding([0.0, theme::S2]),
+            container(system::section(app)).padding([0.0, theme::S2]),
             container(footer).padding([theme::S2, theme::S2]),
         ]
         .spacing(theme::S1),
@@ -124,26 +99,59 @@ fn drawer(app: &App) -> Element<'_, Message> {
 fn item<'a>(app: &'a App, ws: &'a WorkspaceView, index: usize) -> Element<'a, Message> {
     let active = app.active == Some(ws.id());
     let count = ws.pane_count();
-    let label = column![
+    let unsaved = ws.editor.as_ref().is_some_and(|e| !e.dirty_paths().is_empty());
+    let mut name = row![
         text(&ws.model.name)
             .size(theme::T_MD)
             .font(if active { fonts::UI_SEMIBOLD } else { fonts::UI_MEDIUM })
             .wrapping(text::Wrapping::None),
-        text(tildify(&ws.model.root))
-            .size(theme::T_XS)
-            .font(fonts::UI)
-            .color(theme::FG_3)
-            .wrapping(text::Wrapping::None),
     ]
-    .spacing(1);
-    let label = container(label).width(Fill).clip(true);
+    .spacing(5)
+    .align_y(Alignment::Center);
+    if unsaved {
+        name = name.push(tooltip(
+            svg(icons::PENCIL.clone()).width(10).height(10).style(theme::icon(theme::FG_3)),
+            container(text("Unsaved edits").size(theme::T_SM).font(fonts::UI).color(theme::FG_2))
+                .padding([4, 8])
+                .style(theme::keycap),
+            tooltip::Position::Bottom,
+        ));
+    }
+    // What it wants replaces the path, with what the agent said: the reason to look.
+    let wants = app.workspace_status(ws);
+    let subtitle = match (wants.kind, wants.summary()) {
+        (Some(kind), Some(summary)) => {
+            let line = match &wants.message {
+                Some(message) if wants.count == 1 => format!("{summary} · {message}"),
+                _ => summary,
+            };
+            text(line).color(status::color(kind)).font(fonts::UI_MEDIUM)
+        }
+        _ => text(tildify(&ws.model.root)).color(theme::FG_3).font(fonts::UI),
+    };
+    let label = column![name, subtitle.size(theme::T_XS).wrapping(text::Wrapping::None)].spacing(1);
+    let label: Element<'a, Message> = container(label).width(Fill).clip(true).into();
+    // The row is narrow; hovering shows everything the agent said.
+    let label = match wants.message.clone().filter(|_| wants.count == 1) {
+        Some(message) => tooltip(
+            label,
+            container(text(message).size(theme::T_SM).font(fonts::UI).color(theme::FG_2))
+                .max_width(360)
+                .padding([4, 8])
+                .style(theme::keycap),
+            tooltip::Position::Bottom,
+        )
+        .gap(4)
+        .into(),
+        None => label,
+    };
 
     let badge = container(text(count.to_string()).size(theme::T_XS).font(fonts::UI_SEMIBOLD))
         .padding([1, 7])
         .style(theme::count_badge(active));
 
     let base = button(
-        row![monogram(&ws.model.name, active), label, dot(activity(app, ws)), badge]
+        row![monogram(&ws.model.name, active), label, status::dot(&wants, 8.0), badge]
             .spacing(theme::S2 + 2.0)
             .align_y(Alignment::Center),
     )
@@ -187,20 +195,19 @@ fn item<'a>(app: &'a App, ws: &'a WorkspaceView, index: usize) -> Element<'a, Me
 fn rail(app: &App) -> Element<'_, Message> {
     let items = column(app.workspaces.iter().map(|ws| {
         let active = app.active == Some(ws.id());
+        let wants = app.workspace_status(ws);
         let mark = iced::widget::stack![
             monogram(&ws.model.name, active),
-            container(dot(activity(app, ws))).align_right(Length::Fixed(30.0)).align_top(Length::Fixed(30.0)),
+            container(status::dot(&wants, 8.0)).align_right(Length::Fixed(33.0)).align_top(Length::Fixed(33.0)),
         ];
         let btn = button(mark).padding(4).style(theme::nav_item(false)).on_press(Message::SelectWorkspace(ws.id()));
-        tooltip(
-            btn,
-            container(text(&ws.model.name).size(theme::T_SM).font(fonts::UI_MEDIUM).color(theme::FG))
-                .padding([4, 8])
-                .style(theme::keycap),
-            tooltip::Position::Right,
-        )
-        .gap(8)
-        .into()
+        let mut tip = column![text(&ws.model.name).size(theme::T_SM).font(fonts::UI_MEDIUM).color(theme::FG)];
+        if let (Some(kind), Some(summary)) = (wants.kind, wants.summary()) {
+            tip = tip.push(text(summary).size(theme::T_XS).font(fonts::UI_MEDIUM).color(status::color(kind)));
+        }
+        tooltip(btn, container(tip.spacing(1)).padding([4, 8]).style(theme::keycap), tooltip::Position::Right)
+            .gap(8)
+            .into()
     }))
     .spacing(theme::S1)
     .align_x(Alignment::Center);
@@ -210,6 +217,7 @@ fn rail(app: &App) -> Element<'_, Message> {
             icon_button(&icons::SIDEBAR, 16.0, "Expand drawer", Some(Message::Action(Action::ToggleSidebar))),
             scrollable(items).height(Fill).style(theme::scroller),
             usage::rail(app),
+            system::rail(app),
             icon_button(&icons::PLUS, 16.0, "New workspace", Some(Message::Action(Action::NewWorkspace))),
         ]
         .spacing(theme::S3)
