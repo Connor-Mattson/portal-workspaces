@@ -12,6 +12,7 @@ use pw_model::{Axis, GroupId, Mode, WorkspaceId};
 
 use crate::app::{App, Message};
 use crate::background;
+use crate::editor::disk;
 use crate::editor::find::Find;
 use crate::editor::quick_open::QuickOpen;
 use crate::editor::{EditorView, Focus, Region};
@@ -72,6 +73,8 @@ pub enum EditorMsg {
     QuickClose,
     /// The project's files, for quick open.
     Indexed(WorkspaceId, Arc<Vec<String>>),
+    /// A batch of disk changes, read in the background.
+    DiskRead(WorkspaceId, disk::Scan),
 }
 
 impl App {
@@ -163,7 +166,7 @@ impl App {
     pub(crate) fn sync_watches(&mut self, id: WorkspaceId) {
         let Some(ws) = self.workspaces.iter().find(|w| w.id() == id) else { return };
         if let Some(editor) = &ws.editor {
-            self.fs.watch(id, editor.watched_dirs(&ws.model.root));
+            self.fs.watch(id, &ws.model.root, editor.watched_dirs(&ws.model.root));
         }
     }
 
@@ -544,22 +547,38 @@ impl App {
 
     // ---- disk ----------------------------------------------------------------------------------
 
-    /// Paths changed under a workspace (absolute, from the watcher).
-    pub(crate) fn on_fs(&mut self, id: WorkspaceId, paths: Vec<PathBuf>) {
-        let Some(ws) = self.workspaces.iter_mut().find(|w| w.id() == id) else { return };
-        let root = ws.model.root.clone();
-        let Some(editor) = ws.editor.as_mut() else { return };
-        // FSEvents reports resolved paths (/private/var/… for /var/…).
-        let canonical = root.canonicalize().ok();
-        let relative: Vec<PathBuf> = paths
-            .iter()
-            .filter_map(|p| {
-                p.strip_prefix(&root).ok().or_else(|| canonical.as_ref().and_then(|c| p.strip_prefix(c).ok()))
-            })
-            .map(Path::to_path_buf)
-            .collect();
-        editor.on_disk_changed(&root, &relative);
+    /// Paths changed under a workspace (relative to its root, from the watcher). They're read in the
+    /// background (see `editor::disk`), one batch at a time.
+    pub(crate) fn on_fs(&mut self, id: WorkspaceId, paths: Vec<PathBuf>) -> Task<Message> {
+        let Some(editor) = self.workspaces.iter_mut().find(|w| w.id() == id).and_then(|w| w.editor.as_mut()) else {
+            return Task::none();
+        };
+        editor.disk.push(paths);
+        self.read_disk(id)
+    }
+
+    /// Starts reading the workspace's waiting disk changes, unless a batch is already running.
+    fn read_disk(&mut self, id: WorkspaceId) -> Task<Message> {
+        let Some(ws) = self.workspaces.iter_mut().find(|w| w.id() == id) else { return Task::none() };
+        let Some(editor) = ws.editor.as_mut() else { return Task::none() };
+        let Some(paths) = editor.disk.start() else { return Task::none() };
+        let plan = editor.plan_disk(&ws.model.root, &paths);
+        Task::perform(background::blocking(move || plan.read()), move |scan| {
+            Message::Editor(EditorMsg::DiskRead(id, scan))
+        })
+    }
+
+    /// A batch came back: applies it, then starts the next one if changes waited meanwhile.
+    fn on_disk_read(&mut self, id: WorkspaceId, scan: disk::Scan) -> Task<Message> {
+        let Some(editor) = self.workspaces.iter_mut().find(|w| w.id() == id).and_then(|w| w.editor.as_mut()) else {
+            return Task::none();
+        };
+        editor.disk.finished();
+        let again = editor.apply_disk(scan);
+        editor.disk.push(again);
+        editor.refresh_finds();
         self.sync_watches(id);
+        self.read_disk(id)
     }
 
     // ---- messages ------------------------------------------------------------------------------
@@ -579,6 +598,9 @@ impl App {
                 editor.index = Some(files);
             }
             return Task::none();
+        }
+        if let EditorMsg::DiskRead(id, scan) = msg {
+            return self.on_disk_read(id, scan);
         }
         let Some(editor) = self.editor() else { return Task::none() };
         match msg {
@@ -713,7 +735,7 @@ impl App {
             }
             EditorMsg::QuickPick(_) | EditorMsg::QuickSubmit => {}
             EditorMsg::QuickClose => return self.close_quick_open(),
-            EditorMsg::Indexed(..) => unreachable!("handled above"),
+            EditorMsg::Indexed(..) | EditorMsg::DiskRead(..) => unreachable!("handled above"),
         }
         Task::none()
     }

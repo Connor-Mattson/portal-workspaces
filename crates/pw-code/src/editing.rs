@@ -95,9 +95,15 @@ fn scan(lang: Language, line: &str) -> (Vec<std::ops::Range<usize>>, Option<usiz
 /// The bracket next to the cursor and its partner, both as `(line, byte column)`.
 ///
 /// Looks at the character before the cursor first, then the one after it. Brackets in strings and
-/// comments don't count. The search stops after [`MAX_LINES`] lines.
-pub fn matching_bracket(lang: Language, lines: &[&str], line: usize, column: usize) -> Option<[(usize, usize); 2]> {
-    let text = *lines.get(line)?;
+/// comments don't count. The search covers [`MAX_LINES`] lines, the cursor's included, and reads only
+/// those through `line_at`, so a frame never touches the rest of a long file.
+pub fn matching_bracket<'a>(
+    lang: Language,
+    line_at: impl Fn(usize) -> Option<&'a str>,
+    line: usize,
+    column: usize,
+) -> Option<[(usize, usize); 2]> {
+    let text = line_at(line)?;
     let spans = code_spans(lang, text);
     let is_code = |spans: &[std::ops::Range<usize>], i: usize| spans.iter().any(|s| s.contains(&i));
     let bytes = text.as_bytes();
@@ -120,7 +126,8 @@ pub fn matching_bracket(lang: Language, lines: &[&str], line: usize, column: usi
         false
     };
     if forward {
-        for (l, text) in lines.iter().enumerate().skip(line).take(MAX_LINES) {
+        for l in line..line + MAX_LINES {
+            let Some(text) = line_at(l) else { break };
             let spans = if l == line { spans.clone() } else { code_spans(lang, text) };
             for span in spans {
                 let from = if l == line { span.start.max(at + 1) } else { span.start };
@@ -132,8 +139,8 @@ pub fn matching_bracket(lang: Language, lines: &[&str], line: usize, column: usi
             }
         }
     } else {
-        for l in (line.saturating_sub(MAX_LINES)..=line).rev() {
-            let text = lines[l];
+        for l in (line.saturating_sub(MAX_LINES - 1)..=line).rev() {
+            let Some(text) = line_at(l) else { break };
             let spans = if l == line { spans.clone() } else { code_spans(lang, text) };
             for span in spans.into_iter().rev() {
                 let to = if l == line { span.end.min(at) } else { span.end };
@@ -299,12 +306,42 @@ mod tests {
     fn matches_brackets_across_lines_skipping_strings_and_comments() {
         let rs = lang("a.rs");
         let lines = ["fn f(a: &str) {", r#"    g(")"); // }"#, "}"];
-        assert_eq!(matching_bracket(rs, &lines, 0, 15), Some([(0, 14), (2, 0)]));
-        assert_eq!(matching_bracket(rs, &lines, 2, 0), Some([(2, 0), (0, 14)]));
+        let at = |i: usize| lines.get(i).copied();
+        assert_eq!(matching_bracket(rs, at, 0, 15), Some([(0, 14), (2, 0)]));
+        assert_eq!(matching_bracket(rs, at, 2, 0), Some([(2, 0), (0, 14)]));
         // `g(")")`: the paren after the cursor at 5 pairs with the one after the string.
-        assert_eq!(matching_bracket(rs, &lines, 1, 5), Some([(1, 5), (1, 9)]));
-        assert_eq!(matching_bracket(rs, &lines, 0, 1), None);
-        assert_eq!(matching_bracket(rs, &["( ["], 0, 1), None);
+        assert_eq!(matching_bracket(rs, at, 1, 5), Some([(1, 5), (1, 9)]));
+        assert_eq!(matching_bracket(rs, at, 0, 1), None);
+        assert_eq!(matching_bracket(rs, |i| ["( ["].get(i).copied(), 0, 1), None);
+    }
+
+    #[test]
+    fn bracket_matching_reads_only_max_lines_lines_either_way() {
+        let rs = lang("a.rs");
+        // A `{` on line 0 and its `}` on line `closer` of a long file. Returns the match and the lines read.
+        let search = |closer: usize, from: (usize, usize)| {
+            let read = std::cell::RefCell::new(Vec::new());
+            let line_at = |i: usize| {
+                read.borrow_mut().push(i);
+                match i {
+                    0 => Some("{"),
+                    _ if i == closer => Some("}"),
+                    _ => (i < 5000).then_some("x"),
+                }
+            };
+            let found = matching_bracket(rs, line_at, from.0, from.1);
+            (found, read.into_inner())
+        };
+        // The cursor's line and MAX_LINES - 1 more, in both directions.
+        let last = MAX_LINES - 1;
+        assert_eq!(search(last, (0, 1)).0, Some([(0, 0), (last, 0)]));
+        assert_eq!(search(last, (last, 0)).0, Some([(last, 0), (0, 0)]));
+        let (found, read) = search(MAX_LINES, (0, 1));
+        assert_eq!(found, None);
+        assert_eq!(read.iter().max(), Some(&last));
+        let (found, read) = search(MAX_LINES, (MAX_LINES, 0));
+        assert_eq!(found, None);
+        assert_eq!(read.iter().min(), Some(&1));
     }
 
     #[test]

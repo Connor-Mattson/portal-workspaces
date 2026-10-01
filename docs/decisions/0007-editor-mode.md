@@ -31,7 +31,8 @@ agents, not replace them.
   file is open twice.
 - **Saving is explicit.** There's no autosave. Closing a dirty tab or group, deleting a workspace or quitting opens
   one sheet (`Modal::Unsaved`): *Save*, *Don't save*, *Cancel*. Unsaved edits survive switching workspaces and
-  modes, but not quitting. A save writes the file in place (keeping its permissions) and keeps CRLF files CRLF.
+  modes, but not quitting. A save replaces the file atomically, keeping its permissions, and keeps CRLF files CRLF
+  (ADR 0013).
 - **Disk edits are never silently overwritten.** When a watched file changes on disk, a clean document reloads in
   place, as one undoable step, keeping its cursor and scroll. A dirty one gets a banner: *Keep mine* (save over
   the disk) or *Use disk version*. Saving while the banner is up counts as *Keep mine*. A deleted file gets a

@@ -204,7 +204,7 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
     ) -> Vec<Geometry> {
         let geometry = self.rt.cache.draw(renderer, bounds.size(), |frame| {
             if let Some(session) = &self.rt.session {
-                paint(frame, &session.snapshot(self.focused), self.metrics);
+                paint(frame, session.snapshot(self.focused), self.metrics);
             }
         });
         vec![geometry]
@@ -215,22 +215,24 @@ impl canvas::Program<Message> for TerminalCanvas<'_> {
     }
 }
 
-fn paint(frame: &mut Frame, snap: &Snapshot, m: CellMetrics) {
+fn paint(frame: &mut Frame, snap: Snapshot, m: CellMetrics) {
     frame.fill_rectangle(Point::ORIGIN, frame.size(), to_color(snap.background));
     // Column edges are rounded so adjacent backgrounds meet without seams.
     let x = |col: usize| (PAD_X + col as f32 * m.width).round();
 
-    for (r, row) in snap.rows.iter().enumerate() {
+    for (r, row) in snap.rows.into_iter().enumerate() {
         let y = PAD_Y + r as f32 * m.height;
         for bg in &row.backgrounds {
             let (x0, x1) = (x(bg.col), x(bg.col + bg.cells));
             frame.fill_rectangle(Point::new(x0, y), Size::new(x1 - x0, m.height), to_color(bg.color));
         }
-        for run in &row.text {
+        for run in row.text {
             let color = to_color(run.fg);
             let left = PAD_X + run.col as f32 * m.width;
+            // Runs of characters the bundled font has at one cell wide need no shaping or fallback.
+            let shaping = if run.text.chars().all(pw_term::fits_a_cell) { Shaping::Basic } else { Shaping::Advanced };
             frame.fill_text(Text {
-                content: run.text.clone(),
+                content: run.text,
                 position: Point::new(left, y),
                 max_width: f32::INFINITY,
                 color,
@@ -239,7 +241,7 @@ fn paint(frame: &mut Frame, snap: &Snapshot, m: CellMetrics) {
                 font: fonts::mono(run.bold, run.italic),
                 align_x: Alignment::Left,
                 align_y: alignment::Vertical::Top,
-                shaping: if run.text.is_ascii() { Shaping::Basic } else { Shaping::Advanced },
+                shaping,
             });
             let width = run.cells as f32 * m.width;
             if run.underline {
@@ -265,6 +267,32 @@ fn paint(frame: &mut Frame, snap: &Snapshot, m: CellMetrics) {
             CursorShape::Beam => frame.fill_rectangle(origin, Size::new(2.0, m.height), color),
             CursorShape::Underline => {
                 frame.fill_rectangle(Point::new(origin.x, origin.y + m.height - 2.0), Size::new(width, 2.0), color)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iced::advanced::graphics::text::cosmic_text::skrifa::{self, MetadataProvider, instance::Size as FontSize};
+
+    use crate::fonts;
+
+    /// `pw_term::fits_a_cell` decides which characters share a run drawn without fallback fonts. Each one must be
+    /// in every style of the bundled monospace font, one cell (600/1000 em) wide.
+    #[test]
+    fn every_character_that_fits_a_cell_is_one_cell_in_every_mono_face() {
+        let chars: Vec<char> = (0..=0x10ffff).filter_map(char::from_u32).filter(|&c| pw_term::fits_a_cell(c)).collect();
+        assert!(chars.len() > 300);
+        for data in &fonts::DATA[3..] {
+            let font = skrifa::FontRef::new(data).unwrap();
+            let location = skrifa::instance::LocationRef::default();
+            let em = f32::from(font.metrics(FontSize::unscaled(), location).units_per_em);
+            let charmap = font.charmap();
+            let metrics = font.glyph_metrics(FontSize::unscaled(), location);
+            for &c in &chars {
+                let glyph = charmap.map(c).unwrap_or_else(|| panic!("U+{:04X} is missing", c as u32));
+                assert_eq!(metrics.advance_width(glyph), Some(0.6 * em), "U+{:04X}", c as u32);
             }
         }
     }

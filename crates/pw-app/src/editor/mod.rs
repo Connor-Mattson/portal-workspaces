@@ -8,6 +8,7 @@
 //! into the document's other views, so they never drift apart.
 
 pub mod buffer;
+pub mod disk;
 pub mod document;
 pub mod explorer;
 pub mod find;
@@ -69,6 +70,8 @@ pub struct EditorView {
     pub quick_open: Option<QuickOpen>,
     /// The last file index, shown while a fresh one is built.
     pub index: Option<Arc<Vec<String>>>,
+    /// Disk changes waiting to be read.
+    pub disk: disk::Queue,
 }
 
 impl EditorView {
@@ -90,6 +93,7 @@ impl EditorView {
             editor_ratio: session.editor_ratio,
             quick_open: None,
             index: None,
+            disk: disk::Queue::default(),
         };
         for id in session.layout.panes() {
             let mut group = Group::default();
@@ -124,7 +128,7 @@ impl EditorView {
 
     /// Any view of a document.
     fn view_of(&self, path: &Path) -> Option<&crate::ui::editor::code_editor::Content> {
-        self.groups.values().flat_map(|g| &g.tabs).find(|t| t.path == path).map(|t| &t.view)
+        view_in(&self.groups, path)
     }
 
     /// The persisted form. `terminal_cwd` is the terminal's live directory, if it's running.
@@ -360,25 +364,38 @@ impl EditorView {
         }
     }
 
-    /// Reacts to changed paths (relative to the root): re-lists their folders and reloads, flags
-    /// or marks deleted the open documents among them.
-    pub fn on_disk_changed(&mut self, root: &Path, paths: &[PathBuf]) {
+    /// What to read for changed paths (relative to the root): the folders they're in (and they
+    /// themselves, if they're open folders), and the open documents among them. No I/O; the
+    /// [`disk::Plan`] reads off the UI thread.
+    pub fn plan_disk(&self, root: &Path, paths: &BTreeSet<PathBuf>) -> disk::Plan {
         let mut dirs = BTreeSet::new();
         for path in paths {
             dirs.insert(path.parent().map(Path::to_path_buf).unwrap_or_default());
             dirs.insert(path.clone());
         }
-        self.explorer.refresh(root, &dirs);
-        for path in paths {
-            let Some(current) = self.docs.contains_key(path).then(|| self.view_of(path).map(|v| v.text())).flatten()
-            else {
+        let files = paths.iter().filter_map(|p| Some((p.clone(), self.docs.get(p)?.stamp()))).collect();
+        disk::Plan { root: root.to_path_buf(), dirs: self.explorer.plan_refresh(&dirs), files }
+    }
+
+    /// Takes in what a batch read: re-listed folders, and reloads, conflicts or deletions for the open
+    /// documents. Returns the paths to read again: documents saved, reloaded or reopened since the batch
+    /// was planned, whose results are stale.
+    pub fn apply_disk(&mut self, scan: disk::Scan) -> Vec<PathBuf> {
+        self.explorer.apply_refresh(scan.dirs);
+        let mut again = Vec::new();
+        for (path, stamp, read) in scan.files {
+            let Some(doc) = self.docs.get_mut(&path) else { continue };
+            if doc.stamp() != stamp {
+                again.push(path);
                 continue;
-            };
-            let doc = self.docs.get_mut(path).expect("checked");
-            if let Reload::Changed(text) = doc.on_disk_change(root, &current) {
-                self.reload(path, text);
+            }
+            let groups = &self.groups;
+            let current = || view_in(groups, &path).map(|v| v.text()).unwrap_or_default();
+            if let Reload::Changed(text) = doc.on_disk_read(read, current) {
+                self.reload(&path, text);
             }
         }
+        again
     }
 
     // ---- groups --------------------------------------------------------------------------------
@@ -536,6 +553,13 @@ fn group_tree(view: &EditorView) -> pw_model::SplitTree<GroupId> {
     split::tree(&view.grid)
 }
 
+fn view_in<'a>(
+    groups: &'a HashMap<GroupId, Group>,
+    path: &Path,
+) -> Option<&'a crate::ui::editor::code_editor::Content> {
+    groups.values().flat_map(|g| &g.tabs).find(|t| t.path == path).map(|t| &t.view)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,7 +669,8 @@ mod tests {
         std::fs::write(dir.path().join("src/lib.rs"), "changed\n").unwrap();
         std::fs::write(dir.path().join("src/new.rs"), "").unwrap();
         v.explorer.expand(dir.path(), Path::new("src"));
-        v.on_disk_changed(dir.path(), &["src/main.rs".into(), "src/lib.rs".into(), "src/new.rs".into()]);
+        let again = disk_changed(&mut v, dir.path(), &["src/main.rs", "src/lib.rs", "src/new.rs"]);
+        assert!(again.is_empty());
 
         let main = &v.group(g).unwrap().tabs[0];
         assert_eq!(main.view.text(), "fn main() { agent(); }\n");
@@ -657,6 +682,69 @@ mod tests {
         assert_eq!(v.group(g).unwrap().tabs[1].view.text(), "changed\n");
         let lib = v.doc(Path::new("src/lib.rs")).unwrap();
         assert!(!lib.dirty && !lib.conflict);
+    }
+
+    /// Plans, reads and applies one batch, as the app does across threads.
+    fn disk_changed(v: &mut EditorView, root: &Path, paths: &[&str]) -> Vec<PathBuf> {
+        let plan = v.plan_disk(root, &paths.iter().map(PathBuf::from).collect());
+        v.apply_disk(plan.read())
+    }
+
+    #[test]
+    fn deleted_files_are_marked_and_saving_recreates_them() {
+        let dir = project();
+        let mut v = started(dir.path());
+        let g = v.focused;
+        v.open(dir.path(), g, Path::new("src/main.rs"), false).unwrap();
+        v.explorer.expand(dir.path(), Path::new("src"));
+        std::fs::remove_file(dir.path().join("src/main.rs")).unwrap();
+        disk_changed(&mut v, dir.path(), &["src/main.rs"]);
+        assert!(v.doc(Path::new("src/main.rs")).unwrap().deleted);
+        assert_eq!(v.group(g).unwrap().tabs[0].view.text(), "fn main() {}\n", "the text stays open");
+        assert!(!v.explorer.rows().iter().any(|r| r.name == "main.rs"));
+        v.save(dir.path(), Path::new("src/main.rs")).unwrap();
+        assert!(!v.doc(Path::new("src/main.rs")).unwrap().deleted);
+        assert!(dir.path().join("src/main.rs").exists());
+    }
+
+    #[test]
+    fn a_disk_read_that_lands_after_an_edit_flags_a_conflict_instead_of_reloading() {
+        let dir = project();
+        let mut v = started(dir.path());
+        let g = v.focused;
+        v.open(dir.path(), g, Path::new("src/main.rs"), false).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() { agent(); }\n").unwrap();
+        let plan = v.plan_disk(dir.path(), &BTreeSet::from(["src/main.rs".into()]));
+        let scan = plan.read();
+        // The user types while the batch is out.
+        v.change(g, |b| b.type_char('!'));
+        assert!(v.apply_disk(scan).is_empty());
+        let doc = v.doc(Path::new("src/main.rs")).unwrap();
+        assert!(doc.conflict && doc.dirty);
+        assert_eq!(v.group(g).unwrap().tabs[0].view.text(), "!fn main() {}\n", "the edit wasn't replaced");
+    }
+
+    #[test]
+    fn a_disk_read_from_before_a_save_is_read_again() {
+        let dir = project();
+        let mut v = started(dir.path());
+        let g = v.focused;
+        v.open(dir.path(), g, Path::new("src/main.rs"), false).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() { agent(); }\n").unwrap();
+        let plan = v.plan_disk(dir.path(), &BTreeSet::from(["src/main.rs".into()]));
+        let scan = plan.read();
+        // The user saves over the agent's change (no reload yet, so the buffer is still the old text, edited).
+        v.change(g, |b| b.type_char('!'));
+        v.save(dir.path(), Path::new("src/main.rs")).unwrap();
+        // The read saw the agent's text, which isn't on disk anymore: applying it would bring it back.
+        assert_eq!(v.apply_disk(scan), vec![PathBuf::from("src/main.rs")]);
+        assert_eq!(v.group(g).unwrap().tabs[0].view.text(), "!fn main() {}\n");
+        assert!(!v.doc(Path::new("src/main.rs")).unwrap().conflict);
+        // Read again, it's our own save: nothing happens.
+        assert!(disk_changed(&mut v, dir.path(), &["src/main.rs"]).is_empty());
+        let doc = v.doc(Path::new("src/main.rs")).unwrap();
+        assert!(!doc.dirty && !doc.conflict);
+        assert_eq!(v.group(g).unwrap().tabs[0].view.text(), "!fn main() {}\n");
     }
 
     #[test]

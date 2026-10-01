@@ -12,6 +12,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::{DerefMut, Range};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,7 +26,7 @@ use iced::advanced::text::{self, LineHeight, Renderer as _, Text, Wrapping};
 use iced::advanced::widget::{self, Widget, operation, tree};
 use iced::advanced::{Clipboard, Shell, clipboard, mouse};
 use iced::keyboard;
-use iced::widget::text_editor::{Action, Binding, Cursor, Edit, KeyPress, Line, Selection, Status};
+use iced::widget::text_editor::{Action, Binding, Cursor, Edit, KeyPress, Line, Position, Selection, Status};
 use iced::{Border, Color, Element, Event, Font, Length, Pixels, Point, Rectangle, Size, Theme, alignment, window};
 use pw_code::Language;
 
@@ -72,11 +73,28 @@ pub struct Content {
     /// loses an earlier, higher one when several edits land before the next layout (a mirrored view that
     /// isn't shown keeps collecting them), and the highlighter outlives the widget (it belongs to the tab).
     changed_from: Cell<Option<usize>>,
+    /// Counts edits, so what's worked out from the text between frames knows when to redo it.
+    edits: u64,
+    /// Where each line starts in visual rows (see [`ScrollMetrics::of`]).
+    rows: RefCell<Option<Rows>>,
+    /// The bracket pair at the caret, and what it was found for.
+    bracket: Cell<Option<(BracketKey, BracketPair)>>,
 }
+
+/// Edits, caret line and column, language.
+type BracketKey = (u64, usize, usize, Language);
+type BracketPair = Option<[(usize, usize); 2]>;
 
 impl Content {
     pub fn with_text(text: &str) -> Self {
-        Self { editor: RefCell::new(RawEditor::with_text(text)), recording: None, changed_from: Cell::new(None) }
+        Self {
+            editor: RefCell::new(RawEditor::with_text(text)),
+            recording: None,
+            changed_from: Cell::new(None),
+            edits: 0,
+            rows: RefCell::new(None),
+            bracket: Cell::new(None),
+        }
     }
 
     pub fn perform(&mut self, action: Action) {
@@ -91,6 +109,7 @@ impl Content {
         let top = |c: Cursor| c.selection.map_or(c.position.line, |s| s.line.min(c.position.line));
         let before = top(self.cursor());
         self.editor.get_mut().perform(action);
+        self.edits += 1;
         let first = before.min(top(self.cursor()));
         self.changed_from.set(Some(self.changed_from.get().map_or(first, |line| line.min(first))));
     }
@@ -288,7 +307,21 @@ impl<'a, H: Highlighter, Message> CodeEditor<'a, H, Message> {
 
     fn scroll_metrics(&self, geo: &Geometry) -> ScrollMetrics {
         let editor = self.content.editor.borrow();
-        ScrollMetrics::of(editor.buffer(), geo.text, self.wrapping, self.text_size * CHAR_WIDTH)
+        ScrollMetrics::of(self.content, editor.buffer(), geo.text, self.wrapping, self.text_size * CHAR_WIDTH)
+    }
+
+    /// The bracket pair at the caret, found again only when the text, the caret or the language changed.
+    fn bracket_pair(&self, buffer: &cosmic_text::Buffer, caret: Position) -> BracketPair {
+        let key = (self.content.edits, caret.line, caret.column, self.language);
+        if let Some((found_for, pair)) = self.content.bracket.get()
+            && found_for == key
+        {
+            return pair;
+        }
+        let line_at = |i: usize| buffer.lines.get(i).map(|l| l.text());
+        let pair = pw_code::editing::matching_bracket(self.language, line_at, caret.line, caret.column);
+        self.content.bracket.set(Some((key, pair)));
+        pair
     }
 }
 
@@ -303,32 +336,50 @@ struct Geometry {
 /// Where the view is, in visual (wrapped) lines.
 struct ScrollMetrics {
     /// Visual line where each buffer line starts, plus the total at the end.
-    starts: Vec<f32>,
+    starts: Rc<[f32]>,
     offset: f32,
     visible: f32,
 }
 
+/// [`ScrollMetrics::starts`], kept in the [`Content`] between frames, and what they were counted for.
+struct Rows {
+    key: RowsKey,
+    starts: Rc<[f32]>,
+}
+
+#[derive(PartialEq)]
+struct RowsKey {
+    edits: u64,
+    lines: usize,
+    width: f32,
+    char_width: f32,
+    wrapping: Wrapping,
+}
+
 impl ScrollMetrics {
-    fn of(buffer: &cosmic_text::Buffer, text: Rectangle, wrapping: Wrapping, char_width: f32) -> Self {
+    /// Counting rows walks every line, so the count is kept and redone only when the text, the width or
+    /// the wrapping changed, or when a line in view was laid out to a different height than it was
+    /// counted at (lines not laid out yet are estimated). A frame costs the lines in view.
+    fn of(
+        content: &Content,
+        buffer: &cosmic_text::Buffer,
+        text: Rectangle,
+        wrapping: Wrapping,
+        char_width: f32,
+    ) -> Self {
         let line_height = buffer.metrics().line_height.max(1.0);
-        let mut starts = Vec::with_capacity(buffer.lines.len() + 1);
-        let mut total = 0.0;
-        for line in &buffer.lines {
-            starts.push(total);
-            total += match line.layout_opt() {
-                Some(layout) => layout.len().max(1) as f32,
-                // Not laid out yet (far from the view): estimate the wrapping. The font is
-                // monospace, so this is close.
-                None if wrapping != Wrapping::None => {
-                    (line.text().chars().count() as f32 * char_width / text.width).ceil().max(1.0)
-                }
-                None => 1.0,
-            };
-        }
-        starts.push(total);
+        let visible = text.height / line_height;
         let scroll = buffer.scroll();
+        let key = RowsKey { edits: content.edits, lines: buffer.lines.len(), width: text.width, char_width, wrapping };
+        let mut rows = content.rows.borrow_mut();
+        let current =
+            rows.as_ref().is_some_and(|rows| rows.key == key && rows.match_view(buffer, scroll.line, visible));
+        if !current {
+            *rows = Some(Rows { key, starts: count_rows(buffer, text.width, wrapping, char_width) });
+        }
+        let starts = rows.as_ref().expect("just counted").starts.clone();
         let offset = starts.get(scroll.line).copied().unwrap_or(0.0) + scroll.vertical / line_height;
-        Self { starts, offset, visible: text.height / line_height }
+        Self { starts, offset, visible }
     }
 
     fn total(&self) -> f32 {
@@ -361,6 +412,53 @@ impl ScrollMetrics {
         let start = self.starts.get(line).copied().unwrap_or(0.0);
         track.y + track.height * start / self.total().max(1.0)
     }
+}
+
+impl Rows {
+    /// Whether the lines laid out in view, from `first`, have the heights they were counted at.
+    fn match_view(&self, buffer: &cosmic_text::Buffer, first: usize, visible: f32) -> bool {
+        let mut seen = 0.0;
+        for (i, line) in buffer.lines.iter().enumerate().skip(first) {
+            let Some(layout) = line.layout_opt() else { break };
+            let height = layout.len().max(1) as f32;
+            if self.starts.get(i + 1).is_none_or(|end| end - self.starts[i] != height) {
+                return false;
+            }
+            seen += height;
+            if seen > visible {
+                break;
+            }
+        }
+        true
+    }
+}
+
+/// Visual line where each buffer line starts, plus the total at the end.
+fn count_rows(buffer: &cosmic_text::Buffer, width: f32, wrapping: Wrapping, char_width: f32) -> Rc<[f32]> {
+    #[cfg(test)]
+    ROW_COUNTS.with(|n| n.set(n.get() + 1));
+    let mut starts = Vec::with_capacity(buffer.lines.len() + 1);
+    let mut total = 0.0;
+    for line in &buffer.lines {
+        starts.push(total);
+        total += match line.layout_opt() {
+            Some(layout) => layout.len().max(1) as f32,
+            // Not laid out yet (far from the view): estimate the wrapping. The font is
+            // monospace, so this is close.
+            None if wrapping != Wrapping::None => {
+                (line.text().chars().count() as f32 * char_width / width).ceil().max(1.0)
+            }
+            None => 1.0,
+        };
+    }
+    starts.push(total);
+    starts.into()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread counted every line's rows, for tests that check a frame doesn't.
+    static ROW_COUNTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // ---- state ---------------------------------------------------------------------------------
@@ -718,10 +816,7 @@ where
 
         // Bracket pair at the caret.
         if state.focus.is_some() && caret {
-            let lines: Vec<&str> = buffer.lines.iter().map(|l| l.text()).collect();
-            let pair =
-                pw_code::editing::matching_bracket(self.language, &lines, cursor.position.line, cursor.position.column);
-            for (line, column) in pair.into_iter().flatten() {
+            for (line, column) in self.bracket_pair(buffer, cursor.position).into_iter().flatten() {
                 for rect in span_rects(buffer, line, column..column + 1) {
                     if let Some(bounds) = text.intersection(&(rect + origin)) {
                         let quad = renderer::Quad {
@@ -792,7 +887,7 @@ where
 
         // Scrollbar, over everything.
         if state.scrollbar_alpha > 0.0 {
-            let metrics = ScrollMetrics::of(buffer, text, self.wrapping, self.text_size * CHAR_WIDTH);
+            let metrics = ScrollMetrics::of(self.content, buffer, text, self.wrapping, self.text_size * CHAR_WIDTH);
             if metrics.overflows() {
                 renderer.with_layer(geo.bounds, |renderer| {
                     self.draw_scrollbar(renderer, state, &geo, &metrics, cursor.position.line);
@@ -1208,5 +1303,92 @@ mod tests {
         at(&mut content, 3);
         content.perform(Action::Edit(Edit::Backspace));
         assert_eq!(content.changed_from.take(), Some(2));
+    }
+
+    fn rows_counted() -> usize {
+        ROW_COUNTS.with(Cell::get)
+    }
+
+    #[test]
+    fn scroll_metrics_count_rows_again_only_when_something_changed() {
+        let long: String = (0..5000).map(|i| format!("let x{i} = {i}; // a comment long enough to wrap\n")).collect();
+        let mut content = Content::with_text(&long);
+        let text = Rectangle::new(Point::ORIGIN, Size::new(200.0, 300.0));
+        let metrics = |content: &Content, text: Rectangle| {
+            let editor = content.editor.borrow();
+            ScrollMetrics::of(content, editor.buffer(), text, Wrapping::Word, 14.0 * CHAR_WIDTH).total()
+        };
+        let before = rows_counted();
+        let total = metrics(&content, text);
+        // Drawing an unchanged editor again (every frame while a terminal streams) doesn't count again.
+        for _ in 0..10 {
+            assert_eq!(metrics(&content, text), total);
+        }
+        assert_eq!(rows_counted(), before + 1);
+        // A narrower view may wrap differently.
+        let narrow = Rectangle { width: 120.0, ..text };
+        metrics(&content, narrow);
+        assert_eq!(rows_counted(), before + 2);
+        content.perform(Action::Edit(Edit::Enter));
+        assert_eq!(metrics(&content, narrow), metrics(&content, narrow));
+        assert_eq!(rows_counted(), before + 3);
+
+        // Laying out the lines in view at the new width changes their heights: counted once more, then kept.
+        let mut highlighter = iced::advanced::text::highlighter::PlainText;
+        content.editor.borrow_mut().update(
+            narrow.size(),
+            Font::MONOSPACE,
+            Pixels(14.0),
+            LineHeight::default(),
+            Wrapping::Word,
+            &mut highlighter,
+        );
+        let wrapped = metrics(&content, narrow);
+        assert_eq!(metrics(&content, narrow), wrapped);
+        assert_eq!(rows_counted(), before + 4);
+        assert!(wrapped > total, "the lines in view wrap: {wrapped} rows");
+        let editor = content.editor.borrow();
+        let rows = content.rows.borrow();
+        assert!(rows.as_ref().unwrap().match_view(
+            editor.buffer(),
+            0,
+            narrow.height / editor.buffer().metrics().line_height
+        ));
+    }
+
+    #[test]
+    fn the_bracket_pair_is_found_again_only_after_a_change() {
+        use iced::advanced::text::highlighter::PlainText;
+        let mut content = Content::with_text("fn f() {\n    g();\n}\n");
+        let style = Style {
+            background: Color::BLACK,
+            text: Color::BLACK,
+            selection: Color::BLACK,
+            caret: Color::BLACK,
+            current_line: Color::BLACK,
+            line_number: Color::BLACK,
+            line_number_active: Color::BLACK,
+            bracket: Color::BLACK,
+            found: Color::BLACK,
+            found_current: Color::BLACK,
+            thumb: Color::BLACK,
+            thumb_active: Color::BLACK,
+        };
+        let rust = Language::detect(std::path::Path::new("a.rs"), None);
+        let pair = |content: &Content, line, column| {
+            let editor =
+                CodeEditor::<PlainText, ()>::new(content, |_| (), (), |_, _| Format::default(), style).language(rust);
+            let raw = content.editor.borrow();
+            editor.bracket_pair(raw.buffer(), Position { line, column })
+        };
+        assert_eq!(pair(&content, 0, 8), Some([(0, 7), (2, 0)]));
+        // A stand-in result for the same text and caret is what comes back: nothing was searched.
+        let (key, _) = content.bracket.get().unwrap();
+        content.bracket.set(Some((key, None)));
+        assert_eq!(pair(&content, 0, 8), None);
+        // An edit (or a caret move) searches again.
+        content.move_to(Cursor { position: Position { line: 1, column: 4 }, selection: None });
+        content.perform(Action::Edit(Edit::Insert(' ')));
+        assert_eq!(pair(&content, 0, 8), Some([(0, 7), (2, 0)]));
     }
 }

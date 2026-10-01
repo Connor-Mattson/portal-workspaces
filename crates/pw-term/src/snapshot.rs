@@ -33,8 +33,9 @@ pub struct CursorSnap {
     pub color: Rgb,
 }
 
-/// A span of same-styled text. ASCII merges into long runs; any other character gets a run of
-/// its own so fallback-font glyphs with odd advances can't push later text off the grid.
+/// A span of same-styled text. Characters that [`fits_a_cell`] merge into long runs; any other
+/// character gets a run of its own so fallback-font glyphs with odd advances can't push later text
+/// off the grid.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextRun {
     pub col: usize,
@@ -70,6 +71,15 @@ pub struct Snapshot {
     pub cursor: Option<CursorSnap>,
     /// Lines scrolled back into history (0 = following the live output).
     pub display_offset: usize,
+}
+
+/// Whether the bundled monospace font (JetBrains Mono NL, in every style) draws `c` exactly one cell
+/// wide, so it can share a run with its neighbours and be drawn without shaping or fallback fonts.
+/// That's printable ASCII and Latin-1, and box drawing and block elements, which agent TUIs draw their
+/// borders, rules and meters with. The renderer's tests check this list against the font files.
+pub fn fits_a_cell(c: char) -> bool {
+    // U+00AD (soft hyphen) is invisible to some shapers but takes a cell here.
+    matches!(c, ' '..='~' | '\u{a0}'..='\u{ac}' | '\u{ae}'..='\u{ff}' | '\u{2500}'..='\u{259f}')
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,22 +177,26 @@ pub(crate) fn capture(term: &Term<Listener>, palette: &Palette, focused: bool) -
         };
         let c = cell.c;
         let decorated = style.underline || style.strikeout;
+        // Blanks draw nothing. A run can still reach across them (below), so `a b` stays one run.
         if (c == ' ' || c == '\t' || c == '\0') && !decorated {
-            flush(&mut pending, &mut rows);
             continue;
         }
         let c = if c == '\t' || c == '\0' { ' ' } else { c };
         let zerowidth = cell.zerowidth();
-        let simple = c.is_ascii() && zerowidth.is_none() && width == 1;
+        let simple = fits_a_cell(c) && zerowidth.is_none() && width == 1;
 
+        // Anything between the run and this cell was blank: a cell that wasn't would have ended the run.
+        // Blanks aren't underlined or struck out, so a decorated run only takes adjacent cells.
         if simple
             && let Some((prow, run, pstyle)) = pending.as_mut()
             && *prow == row
             && *pstyle == style
-            && run.col + run.cells == col
+            && (run.col + run.cells == col || (run.col + run.cells < col && !decorated))
         {
+            let gap = col - (run.col + run.cells);
+            run.text.extend(std::iter::repeat_n(' ', gap));
             run.text.push(c);
-            run.cells += 1;
+            run.cells += gap + 1;
             continue;
         }
         flush(&mut pending, &mut rows);
@@ -227,5 +241,78 @@ impl Snapshot {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    use super::*;
+    use crate::activity::Activity;
+    use crate::events::Shared;
+    use crate::{ActivityConfig, GridSize};
+
+    /// The screen after a program printed `bytes`, without a PTY.
+    fn screen(cols: u16, rows: u16, bytes: &[u8]) -> Snapshot {
+        let size = GridSize { cols, rows, cell_width: 8, cell_height: 16 };
+        let shared = Arc::new(Shared {
+            sink: Arc::new(|_| {}),
+            dirty: false.into(),
+            palette: Palette::default(),
+            activity: Activity::new(ActivityConfig::default()),
+            window_size: Mutex::new(size.window_size()),
+            loop_tx: OnceLock::new(),
+        });
+        let mut term = Term::new(Config::default(), &size, Listener(shared));
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        capture(&term, &Palette::default(), true)
+    }
+
+    /// Each row's runs as (col, cells, text).
+    fn runs(snap: &Snapshot) -> Vec<Vec<(usize, usize, &str)>> {
+        snap.rows.iter().map(|row| row.text.iter().map(|r| (r.col, r.cells, r.text.as_str())).collect()).collect()
+    }
+
+    #[test]
+    fn box_drawing_merges_into_runs() {
+        let snap = screen(20, 4, "╭──────╮\r\n│ ok ▌░│\r\n╰──────╯".as_bytes());
+        assert_eq!(runs(&snap)[..3], [vec![(0, 8, "╭──────╮")], vec![(0, 8, "│ ok ▌░│")], vec![(0, 8, "╰──────╯")]]);
+    }
+
+    #[test]
+    fn runs_reach_across_blanks_but_not_across_styles() {
+        let snap = screen(30, 3, b"a  b \x1b[1mbold\x1b[0m c\r\n\x1b[4mu\x1b[0m \x1b[4mv\x1b[0m");
+        let rows = runs(&snap);
+        assert_eq!(rows[0], [(0, 4, "a  b"), (5, 4, "bold"), (10, 1, "c")]);
+        // The blank between two underlined letters isn't underlined, so it can't join them.
+        assert_eq!(rows[1], [(0, 1, "u"), (2, 1, "v")]);
+    }
+
+    #[test]
+    fn wide_combining_and_fallback_characters_keep_their_own_runs() {
+        // A wide CJK character, an `e` with a combining acute, and a glyph the bundled font lacks.
+        let snap = screen(20, 2, "ab漢cd e\u{301}f ✻g".as_bytes());
+        assert_eq!(
+            runs(&snap)[0],
+            [(0, 2, "ab"), (2, 2, "漢"), (4, 2, "cd"), (7, 1, "e\u{301}"), (8, 1, "f"), (10, 1, "✻"), (11, 1, "g")]
+        );
+        // Merged runs hold one character per cell, so they can't drift off the grid either.
+        for run in snap.rows.iter().flat_map(|r| &r.text).filter(|r| r.text.chars().all(fits_a_cell)) {
+            assert_eq!(run.text.chars().count(), run.cells, "{run:?}");
+        }
+    }
+
+    #[test]
+    fn an_agent_screen_is_a_few_runs_per_row() {
+        let snap = screen(120, 42, include_bytes!("../fixtures/agent-screen.ansi"));
+        let runs: usize = snap.rows.iter().map(|r| r.text.len()).sum();
+        // One run per glyph would be 660 here; 62 with box drawing merged and blanks bridged.
+        assert!(runs <= 70, "{runs} runs");
+        assert!(snap.text().contains("└────────────────────┴────────────┴────────────┴──────────┘"));
     }
 }

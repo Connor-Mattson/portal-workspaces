@@ -4,7 +4,8 @@
 //! folders of open files. A recursive watch would walk `node_modules` and `target` and can run
 //! out of inotify watches. Raw events go to one coalescing thread, which waits for 150 ms of quiet
 //! and delivers one batch of changed paths per workspace, so an agent rewriting ten files, or a
-//! `git checkout`, is one update rather than hundreds. Nothing is polled.
+//! `git checkout`, is one update rather than hundreds. Paths arrive relative to the workspace root,
+//! worked out on the watcher's thread. Nothing is polled.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
@@ -56,23 +57,30 @@ impl Default for FsHub {
 }
 
 impl FsHub {
-    /// Batches of changed absolute paths, per workspace.
+    /// Batches of changed paths, relative to the workspace's root.
     pub fn events(&self) -> Subscription<(WorkspaceId, Vec<PathBuf>)> {
         self.inbox.subscription()
     }
 
-    /// Watches exactly `dirs` (absolute) for `workspace`, adding and removing watches as needed.
-    pub fn watch(&mut self, workspace: WorkspaceId, dirs: BTreeSet<PathBuf>) {
+    /// Watches exactly `dirs` (absolute, under `root`) for `workspace`, adding and removing watches as
+    /// needed.
+    pub fn watch(&mut self, workspace: WorkspaceId, root: &Path, dirs: BTreeSet<PathBuf>) {
         if !self.watches.contains_key(&workspace) {
             let raw = self.raw.clone();
+            let root = root.to_path_buf();
+            // FSEvents reports resolved paths (/private/var/… for /var/…).
+            let resolved = root.canonicalize().unwrap_or_else(|_| root.clone());
             let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let Ok(event) = res else { return };
                 if matches!(event.kind, EventKind::Access(_)) {
                     return;
                 }
                 for path in event.paths {
-                    if !in_vcs_dir(&path) {
-                        let _ = raw.send((workspace, path));
+                    let Ok(relative) = path.strip_prefix(&root).or_else(|_| path.strip_prefix(&resolved)) else {
+                        continue;
+                    };
+                    if !in_vcs_dir(relative) {
+                        let _ = raw.send((workspace, relative.to_path_buf()));
                     }
                 }
             });

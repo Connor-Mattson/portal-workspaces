@@ -55,6 +55,16 @@ iced's `Highlighter`, which is fed one line at a time and told the first line th
     Colouring their end takes several seconds of frames, and the snapshots kept grow with the file.
   - Classifying a scope stack is cached per scope (the innermost scope with a class wins, and each scope
     resolves on its own), which makes parsing about 20% faster.
+- **Drawing an unchanged editor costs the lines in view, not the file.** In Editor mode a streaming terminal panel
+  redraws the window every frame, so per-frame work on a long file adds up.
+  - The bracket matcher reads lines through an accessor, only the `MAX_LINES` (1,000) around the caret, and
+    the pair is kept in the `Content` until the text, the caret or the language changes. It used to collect
+    every line into a `Vec<&str>` each frame: about 280 µs and 1.6 MB a frame on a 100,000-line file.
+  - The scrollbar's row counts (where each line starts in wrapped rows) are kept in the `Content` too, and
+    counted again only when the text, the width, the font size or the wrapping changes, or when a line in
+    view was laid out to a different height than it was counted at. Checking that costs the lines in view.
+    Counting walked every line on each frame and each scrollbar drag event: about 230 µs a frame on that file;
+    kept, it's under 1 µs. `Content` counts its edits, which is how both caches know the text changed.
 - **`pw-code` holds the editing knowledge.** It's a leaf crate with no GUI types and no threads: languages,
   highlighting, smart editing, text diffs, find, fuzzy matching and file listing. All of it is unit-tested
   without a window.

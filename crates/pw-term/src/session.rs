@@ -34,7 +34,7 @@ pub struct GridSize {
 }
 
 impl GridSize {
-    fn window_size(self) -> WindowSize {
+    pub(crate) fn window_size(self) -> WindowSize {
         WindowSize {
             num_cols: self.cols.max(1),
             num_lines: self.rows.max(1),

@@ -2,7 +2,8 @@
 //! being typed into (a new file's name, or a rename).
 //!
 //! Only expanded folders are ever listed, and they're re-listed when the watcher reports a change
-//! in them. Rows have a fixed height, so the view draws only the ones in sight.
+//! in them: off the UI thread ([`relist`]), then applied unless the folder changed meanwhile. Rows
+//! have a fixed height, so the view draws only the ones in sight.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,59 @@ struct Listing {
     /// The folder itself is ignored, so everything in it is too.
     ignored: bool,
     error: Option<String>,
+    /// When it was listed (see [`super::disk::stamp`]).
+    stamp: u64,
+}
+
+/// A folder to re-list, as the tree knew it when the work was planned.
+#[derive(Debug, Clone)]
+pub struct Relist {
+    pub dir: PathBuf,
+    /// The listing it would replace.
+    stamp: u64,
+    /// Whether the folder was ignored then, for when its parent isn't re-listed with it.
+    ignored: bool,
+}
+
+/// What re-listing a folder found.
+#[derive(Debug, Clone)]
+pub enum Relisted {
+    Gone,
+    Listed { entries: Result<Vec<Entry>, String>, ignored: bool },
+}
+
+/// Re-lists the planned folders, parents first so ignore flags carry down. Blocking: the editor runs it
+/// off the UI thread.
+pub fn relist(root: &Path, plan: Vec<Relist>) -> Vec<(Relist, Relisted)> {
+    let mut out: Vec<(Relist, Relisted)> = Vec::with_capacity(plan.len());
+    for job in plan {
+        let found = if job.dir.as_os_str().is_empty() {
+            Relisted::Listed { entries: fs::list_dir(root, &job.dir, false).map_err(|e| e.to_string()), ignored: false }
+        } else {
+            // A parent re-listed just now decides; otherwise the tree's flag from planning does.
+            let parent = job.dir.parent().unwrap_or(Path::new(""));
+            let name = job.dir.file_name().and_then(|n| n.to_str());
+            let from_parent = out.iter().find(|(j, _)| j.dir == parent).map(|(_, found)| match found {
+                Relisted::Gone => None,
+                Relisted::Listed { entries, ignored } => {
+                    Some(*ignored || entries.iter().flatten().any(|e| Some(e.name.as_str()) == name && e.ignored))
+                }
+            });
+            match from_parent {
+                Some(None) => Relisted::Gone,
+                _ if !root.join(&job.dir).is_dir() => Relisted::Gone,
+                from_parent => {
+                    let ignored = from_parent.flatten().unwrap_or(job.ignored);
+                    Relisted::Listed {
+                        entries: fs::list_dir(root, &job.dir, ignored).map_err(|e| e.to_string()),
+                        ignored,
+                    }
+                }
+            }
+        };
+        out.push((job, found));
+    }
+    out
 }
 
 /// A visible row of the tree.
@@ -88,9 +142,15 @@ impl Explorer {
 
     fn load(&mut self, root: &Path, dir: &Path) {
         let ignored = !dir.as_os_str().is_empty() && self.ignored(dir);
-        let listing = match fs::list_dir(root, dir, ignored) {
-            Ok(entries) => Listing { entries, ignored, error: None },
-            Err(err) => Listing { entries: Vec::new(), ignored, error: Some(err.to_string()) },
+        let entries = fs::list_dir(root, dir, ignored).map_err(|e| e.to_string());
+        self.set_listing(dir, entries, ignored);
+    }
+
+    fn set_listing(&mut self, dir: &Path, entries: Result<Vec<Entry>, String>, ignored: bool) {
+        let stamp = super::disk::stamp();
+        let listing = match entries {
+            Ok(entries) => Listing { entries, ignored, error: None, stamp },
+            Err(error) => Listing { entries: Vec::new(), ignored, error: Some(error), stamp },
         };
         self.listings.insert(dir.to_path_buf(), listing);
     }
@@ -124,20 +184,41 @@ impl Explorer {
         self.selected = Some(path.to_path_buf());
     }
 
-    /// Re-lists the given folders if they're loaded (after the watcher saw changes in them). Folders
-    /// that disappeared close.
-    pub fn refresh(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) {
-        // Parents first, so ignore flags carry down.
-        let mut dirs: Vec<&PathBuf> = dirs.iter().filter(|d| self.listings.contains_key(*d)).collect();
-        dirs.sort_by_key(|p| p.components().count());
-        for dir in dirs {
-            if !dir.as_os_str().is_empty() && !root.join(dir).is_dir() {
-                self.expanded.retain(|e| !e.starts_with(dir));
-                self.listings.retain(|l, _| !l.starts_with(dir));
+    /// Which of `dirs` to re-list for [`relist`]: the loaded ones, parents first.
+    pub fn plan_refresh(&self, dirs: &BTreeSet<PathBuf>) -> Vec<Relist> {
+        let mut plan: Vec<Relist> = dirs
+            .iter()
+            .filter_map(|dir| {
+                let listing = self.listings.get(dir)?;
+                Some(Relist { dir: dir.clone(), stamp: listing.stamp, ignored: listing.ignored })
+            })
+            .collect();
+        plan.sort_by_key(|r| r.dir.components().count());
+        plan
+    }
+
+    /// Takes in what [`relist`] found. Folders that disappeared close. A folder collapsed or listed
+    /// again since the plan keeps what it has: that's newer.
+    pub fn apply_refresh(&mut self, found: Vec<(Relist, Relisted)>) {
+        for (job, found) in found {
+            if self.listings.get(&job.dir).is_none_or(|l| l.stamp != job.stamp) {
                 continue;
             }
-            self.load(root, dir);
+            match found {
+                Relisted::Gone => {
+                    self.expanded.retain(|e| !e.starts_with(&job.dir));
+                    self.listings.retain(|l, _| !l.starts_with(&job.dir));
+                }
+                Relisted::Listed { entries, ignored } => self.set_listing(&job.dir, entries, ignored),
+            }
         }
+    }
+
+    /// Re-lists the given folders if they're loaded, here and now (the refresh button). Folders that
+    /// disappeared close.
+    pub fn refresh(&mut self, root: &Path, dirs: &BTreeSet<PathBuf>) {
+        let plan = self.plan_refresh(dirs);
+        self.apply_refresh(relist(root, plan));
     }
 
     /// Re-lists everything loaded.
@@ -290,5 +371,26 @@ mod tests {
         e.refresh(dir.path(), &BTreeSet::from(["src".into(), "src/ui".into()]));
         assert_eq!(names(&e), vec!["src", "  main.rs", "  new.rs", "target", ".gitignore", "Cargo.toml"]);
         assert!(!e.expanded.contains(Path::new("src/ui")));
+    }
+
+    #[test]
+    fn relisting_carries_new_ignore_rules_down_and_skips_folders_changed_meanwhile() {
+        let dir = fixture();
+        let mut e = Explorer::default();
+        e.start(dir.path(), &["src".into(), "src/ui".into(), "target".into()]);
+        let plan = e.plan_refresh(&BTreeSet::from(["".into(), "src".into(), "src/ui".into(), "target".into()]));
+        assert_eq!(plan.iter().map(|r| r.dir.to_str().unwrap()).collect::<Vec<_>>(), ["", "src", "target", "src/ui"]);
+
+        // `src` becomes ignored. After the read, a file appears in `target`, and `target` is listed again
+        // (closed and reopened): that listing is newer than the read.
+        std::fs::write(dir.path().join(".gitignore"), "target/\nsrc/\n").unwrap();
+        let found = relist(dir.path(), plan);
+        std::fs::write(dir.path().join("target/new"), "").unwrap();
+        e.toggle(dir.path(), Path::new("target"));
+        e.toggle(dir.path(), Path::new("target"));
+        e.apply_refresh(found);
+        let ignored = |name: &str| e.rows().iter().find(|r| r.name == name).unwrap().ignored;
+        assert!(ignored("src") && ignored("ui") && ignored("view.rs"), "the new rule reaches src/ui's entries");
+        assert!(e.rows().iter().any(|r| r.name == "new"), "the stale read didn't replace the newer listing");
     }
 }

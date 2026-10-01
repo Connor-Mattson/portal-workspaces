@@ -22,4 +22,4 @@ pub use events::TermEvent;
 pub use input::{Key, KeyInput, Mods, NamedKey};
 pub use mouse::{MouseButton, MouseEvent, MouseEventKind};
 pub use session::{GridPoint, GridSize, SelectionKind, Session, SessionConfig, SpawnError};
-pub use snapshot::{BgRun, CursorShape, CursorSnap, Row, Snapshot, TextRun};
+pub use snapshot::{BgRun, CursorShape, CursorSnap, Row, Snapshot, TextRun, fits_a_cell};

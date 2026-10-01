@@ -617,7 +617,7 @@ impl App {
             Message::SetMode(mode) => return self.set_mode(mode),
             Message::Editor(msg) => return self.on_editor(msg),
             Message::Explorer(msg) => return self.on_explorer(msg),
-            Message::Fs(id, paths) => self.on_fs(id, paths),
+            Message::Fs(id, paths) => return self.on_fs(id, paths),
             Message::Dev(msg) => return self.on_dev(msg),
             Message::Note(event) => return self.on_note(event),
             Message::ToggleNotifications => self.toggle_notifications(),
@@ -955,6 +955,7 @@ impl App {
             | Message::SaveTick
             | Message::CwdTick
             | Message::Fs(..)
+            | Message::Editor(EditorMsg::DiskRead(..) | EditorMsg::Indexed(..))
             | Message::Note(_)
             | Message::Dev(_) => true,
             // The rest of the right-click that opened it.

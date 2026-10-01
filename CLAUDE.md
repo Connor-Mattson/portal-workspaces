@@ -77,7 +77,8 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
   - `events.rs`: `TermEvent`, and wakeup coalescing (one `Wakeup` until the next `snapshot`).
   - `tap.rs`: the PTY wrapper the event loop reads through. `notify.rs`: OSC 9/777/99 notifications.
     `activity.rs`: busy/idle (`ActivityConfig`) and the activity watcher thread.
-  - `snapshot.rs`: the visible grid, copied into styled runs for drawing.
+  - `snapshot.rs`: the visible grid, copied into styled runs for drawing (ADR 0014). `fixtures/`: an agent
+    screen for tests.
   - `input.rs`: key → bytes (xterm + kitty disambiguate).
   - `mouse.rs`: mouse reporting.
   - `cwd.rs`: shell cwd (`/proc` on Linux, libproc on macOS).
@@ -110,8 +111,9 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
   - `app/editor.rs`: `EditorMsg`, modes, tabs, groups, find, quick open, saving, the terminal panel, disk changes.
     `app/explorer.rs`: `ExplorerMsg`, the file tree's open/new/rename/trash and its keys.
   - `editor/`: Editor mode's state, no widgets. `mod.rs`: `EditorView` and `change`. `document.rs` (disk sync,
-    conflicts), `buffer.rs` (editing commands), `history.rs` (undo, 32 MB per file), `group.rs` (tabs),
-    `explorer.rs` (listings, virtualization), `quick_open.rs`, `find.rs`, `watch.rs` (`FsHub`).
+    conflicts, atomic saves: ADR 0013), `buffer.rs` (editing commands), `history.rs` (undo, 32 MB per file),
+    `group.rs` (tabs), `explorer.rs` (listings, virtualization), `quick_open.rs`, `find.rs`, `watch.rs`
+    (`FsHub`), `disk.rs` (disk changes read off the UI thread, ADR 0009).
   - `workspace.rs`: `WorkspaceView` (live `pane_grid::State` ⇄ `LayoutNode`, plus detached panes, mode, editor).
   - `split.rs`: `SplitTree` ⇄ `pane_grid` for agent panes and editor groups. `background.rs`: work off the UI
     thread.
