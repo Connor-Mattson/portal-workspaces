@@ -21,6 +21,10 @@ case "$(uname -s)" in
     ;;
   Darwin)
     command -v cargo-bundle >/dev/null || cargo install cargo-bundle
+    # libproc runs bindgen; use Xcode's libclang so a stray (e.g. x86_64 Homebrew) LLVM on PATH can't break it.
+    if [ -z "${LIBCLANG_PATH:-}" ] && clang_bin="$(xcrun --find clang 2>/dev/null)"; then
+      export LIBCLANG_PATH="$(dirname "$clang_bin")/../lib"
+    fi
     cargo bundle --release -p pw-app
     mkdir -p "$HOME/Applications"
     rm -rf "$HOME/Applications/Portal Workspaces.app"

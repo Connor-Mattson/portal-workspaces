@@ -28,4 +28,6 @@ identifier = "dev.portal.workspaces"
 icon = ["../../assets/icons/portal-workspaces.png"]
 category = "public.app-category.developer-tools"
 short_description = "Terminal workspaces for agentic development"
-osx_minimum_system_version = "11.0"
+
+[package.metadata.bundle.osx]
+minimum_system_version = "11.0"
