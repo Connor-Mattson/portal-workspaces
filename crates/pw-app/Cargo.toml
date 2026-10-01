@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 pw-model.workspace = true
 pw-term.workspace = true
+pw-usage.workspace = true
+jiff.workspace = true
 iced = { workspace = true, features = ["wgpu", "tiny-skia", "canvas", "tokio", "advanced", "svg", "x11", "wayland", "thread-pool", "crisp", "web-colors"] }
 rfd.workspace = true
 directories.workspace = true

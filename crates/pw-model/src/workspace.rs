@@ -22,8 +22,14 @@ pub struct Workspace {
     pub root: PathBuf,
     /// `None` when every pane has been closed.
     pub layout: Option<LayoutNode>,
+    /// Specs for every pane, in the layout or detached.
     pub panes: BTreeMap<PaneId, PaneSpec>,
+    /// A pane in `layout`.
     pub focused: Option<PaneId>,
+    /// Panes popped out into their own windows (added in schema 3). They're outside `layout` but still count
+    /// toward [`MAX_PANES`].
+    #[serde(default)]
+    pub detached: Vec<PaneId>,
 }
 
 impl Workspace {
@@ -38,15 +44,17 @@ impl Workspace {
             focused: ids.first().copied(),
             root,
             panes,
+            detached: Vec::new(),
         }
     }
 
+    /// Every terminal of the workspace: the layout's and the detached ones.
     pub fn pane_count(&self) -> usize {
-        self.layout.as_ref().map_or(0, LayoutNode::pane_count)
+        self.layout.as_ref().map_or(0, LayoutNode::pane_count) + self.detached.len()
     }
 
-    /// Makes a loaded workspace self-consistent: specs exist for exactly the panes in the layout,
-    /// ratios are in range, the focus points at a real pane and the pane cap holds.
+    /// Makes a loaded workspace self-consistent: specs exist for exactly the panes in the layout and the
+    /// detached ones, ratios are in range, the focus points at a pane in the layout and the pane cap holds.
     pub fn repaired(mut self) -> Self {
         let mut layout = self.layout.take().map(LayoutNode::sanitized);
         while let Some(tree) = layout.as_ref().filter(|t| t.pane_count() > MAX_PANES) {
@@ -54,10 +62,16 @@ impl Workspace {
             layout = layout.and_then(|t| t.close_pane(last));
         }
         let live = layout.as_ref().map(LayoutNode::panes).unwrap_or_default();
+        let mut seen: std::collections::HashSet<PaneId> = live.iter().copied().collect();
+        self.detached.retain(|id| seen.insert(*id));
+        self.detached.truncate(MAX_PANES - live.len());
         let root = self.root.clone();
         let mut specs = std::mem::take(&mut self.panes);
-        self.panes =
-            live.iter().map(|id| (*id, specs.remove(id).unwrap_or_else(|| PaneSpec { cwd: root.clone() }))).collect();
+        self.panes = live
+            .iter()
+            .chain(&self.detached)
+            .map(|id| (*id, specs.remove(id).unwrap_or_else(|| PaneSpec { cwd: root.clone() })))
+            .collect();
         if !self.focused.is_some_and(|f| live.contains(&f)) {
             self.focused = live.first().copied();
         }
@@ -107,5 +121,20 @@ mod tests {
         let ws = ws.repaired();
         assert_eq!(ws.pane_count(), MAX_PANES);
         assert!(ws.panes.contains_key(&first));
+    }
+
+    #[test]
+    fn repair_keeps_detached_panes_within_the_cap() {
+        let mut ws = Workspace::new("demo", "/root".into(), Preset::Grid { cols: 3, rows: 2 });
+        let in_layout = ws.focused.unwrap();
+        let (a, b, c) = (PaneId::new(), PaneId::new(), PaneId::new());
+        ws.panes.insert(a, PaneSpec { cwd: "/a".into() });
+        ws.detached = vec![a, in_layout, a, b, c];
+        let ws = ws.repaired();
+        assert_eq!(ws.detached, vec![a, b]);
+        assert_eq!(ws.pane_count(), MAX_PANES);
+        assert_eq!(ws.panes.len(), MAX_PANES);
+        assert_eq!(ws.panes[&a].cwd, PathBuf::from("/a"));
+        assert_eq!(ws.panes[&b].cwd, PathBuf::from("/root"));
     }
 }

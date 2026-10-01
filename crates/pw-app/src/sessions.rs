@@ -5,16 +5,15 @@
 //! only when its pane is closed or its workspace deleted.
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use iced::Subscription;
-use iced::futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use iced::futures::stream::{self, BoxStream, StreamExt};
+use iced::futures::channel::mpsc::UnboundedSender;
 use iced::widget::canvas;
 use pw_model::PaneId;
 use pw_term::{GridSize, Session, SessionConfig, TermEvent};
+
+use crate::inbox::{self, Inbox};
 
 /// Everything the UI tracks about one pane's terminal.
 pub struct PaneRuntime {
@@ -40,41 +39,23 @@ impl PaneRuntime {
     }
 }
 
-type EventReceiver = UnboundedReceiver<(PaneId, TermEvent)>;
-
-/// Delivers terminal events from every IO thread to the app as one subscription.
-#[derive(Clone)]
-struct Inbox(Arc<Mutex<Option<EventReceiver>>>);
-
-impl Hash for Inbox {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // There is exactly one inbox per app, so a constant identity is right.
-        "pw-terminal-events".hash(state);
-    }
-}
-
 pub struct Sessions {
     panes: HashMap<PaneId, PaneRuntime>,
     tx: UnboundedSender<(PaneId, TermEvent)>,
-    inbox: Inbox,
+    inbox: Inbox<(PaneId, TermEvent)>,
 }
 
 impl Default for Sessions {
     fn default() -> Self {
-        let (tx, rx) = mpsc::unbounded();
-        Self { panes: HashMap::new(), tx, inbox: Inbox(Arc::new(Mutex::new(Some(rx)))) }
+        let (tx, inbox) = inbox::channel("pw-terminal-events");
+        Self { panes: HashMap::new(), tx, inbox }
     }
 }
 
 impl Sessions {
     /// Terminal events from all sessions.
     pub fn events(&self) -> Subscription<(PaneId, TermEvent)> {
-        Subscription::run_with(self.inbox.clone(), |inbox: &Inbox| -> BoxStream<'static, (PaneId, TermEvent)> {
-            match inbox.0.lock().expect("inbox lock").take() {
-                Some(rx) => rx.boxed(),
-                None => stream::empty().boxed(),
-            }
-        })
+        self.inbox.subscription()
     }
 
     pub fn get(&self, id: PaneId) -> Option<&PaneRuntime> {

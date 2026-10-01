@@ -7,9 +7,11 @@ pub mod ids;
 pub mod layout;
 pub mod state;
 pub mod store;
+pub mod usage;
 pub mod workspace;
 
-pub use ids::{PaneId, WorkspaceId};
+pub use ids::{PaneId, ProfileId, WorkspaceId};
 pub use layout::{Axis, LayoutFull, LayoutNode, MAX_PANES, Preset};
 pub use state::{PersistedState, SCHEMA_VERSION, UiPrefs, WindowGeometry};
+pub use usage::{PollEnv, Provider, UsageProfile};
 pub use workspace::{PaneSpec, Workspace};

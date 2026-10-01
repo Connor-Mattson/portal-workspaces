@@ -8,7 +8,7 @@ use crate::fonts;
 use crate::icons;
 use crate::keymap::Action;
 use crate::theme;
-use crate::ui::{icon_button, tildify};
+use crate::ui::{icon_button, tildify, usage};
 use crate::workspace::WorkspaceView;
 
 #[derive(Clone, Copy)]
@@ -110,6 +110,7 @@ fn drawer(app: &App) -> Element<'_, Message> {
             container(brand).padding(Padding::from([theme::S4, theme::S3]).bottom(theme::S3)),
             container(header).padding([0.0, theme::S3]),
             scrollable(container(items).padding([theme::S1, theme::S2])).height(Fill).style(theme::scroller),
+            container(usage::section(app)).padding([0.0, theme::S2]),
             container(footer).padding([theme::S2, theme::S2]),
         ]
         .spacing(theme::S1),
@@ -208,6 +209,7 @@ fn rail(app: &App) -> Element<'_, Message> {
         column![
             icon_button(&icons::SIDEBAR, 16.0, "Expand drawer", Some(Message::Action(Action::ToggleSidebar))),
             scrollable(items).height(Fill).style(theme::scroller),
+            usage::rail(app),
             icon_button(&icons::PLUS, 16.0, "New workspace", Some(Message::Action(Action::NewWorkspace))),
         ]
         .spacing(theme::S3)

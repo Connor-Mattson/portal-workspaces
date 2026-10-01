@@ -10,6 +10,7 @@ use crate::app::{App, Message};
 use crate::fonts;
 use crate::keymap;
 use crate::theme;
+use crate::ui::profile_editor::{self, ProfileEditor, ProfileMsg};
 use crate::ui::{preset_glyph, tildify};
 
 const NAME_INPUT: &str = "workspace-name";
@@ -17,8 +18,14 @@ const NAME_INPUT: &str = "workspace-name";
 pub enum Modal {
     Editor(Editor),
     ConfirmDelete(WorkspaceId),
-    ConfirmPreset { workspace: WorkspaceId, preset: Preset, closing: usize },
+    ConfirmPreset {
+        workspace: WorkspaceId,
+        preset: Preset,
+        closing: usize,
+    },
     Shortcuts,
+    /// Track a new AI account, or edit one.
+    Profile(ProfileEditor),
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +35,7 @@ pub enum ModalMsg {
     Browse,
     Browsed(Option<PathBuf>),
     Preset(Preset),
+    Profile(ProfileMsg),
     Delete,
     Submit,
     Cancel,
@@ -137,6 +145,7 @@ pub fn view<'a>(app: &'a App, modal: &'a Modal) -> Element<'a, Message> {
             ),
         ),
         Modal::Shortcuts => (440.0, shortcuts()),
+        Modal::Profile(editor) => (480.0, profile_editor::view(editor)),
     };
     let card = container(content).width(width).padding(theme::S6).style(theme::card);
     // Clicking the scrim dismisses; `opaque` keeps clicks on the card from reaching it.

@@ -1,8 +1,11 @@
 //! Views. Each module renders one region of the window from the app state.
 
 pub mod modal;
+pub mod pane_window;
+pub mod profile_editor;
 pub mod sidebar;
 pub mod terminal;
+pub mod usage;
 pub mod workspace_view;
 
 use iced::mouse::Cursor;
@@ -13,6 +16,7 @@ use pw_model::{Axis, LayoutNode, PaneId, Preset};
 
 use crate::app::{App, Message};
 use crate::fonts;
+use crate::sessions::PaneRuntime;
 use crate::theme;
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -54,6 +58,11 @@ pub fn tip_for<'a>(content: Element<'a, Message>, tip: &'a str) -> Element<'a, M
     )
     .gap(6)
     .into()
+}
+
+/// What a terminal is called: the title its program set, or its cwd.
+pub fn pane_label(rt: &PaneRuntime) -> String {
+    rt.title.clone().unwrap_or_else(|| tildify(&rt.cwd))
 }
 
 /// Shortens a path under the home directory to `~/…`.

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pw-model", "crates/pw-term", "crates/pw-app"]
+members = ["crates/pw-model", "crates/pw-term", "crates/pw-usage", "crates/pw-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 pw-model = { path = "crates/pw-model" }
 pw-term = { path = "crates/pw-term" }
+pw-usage = { path = "crates/pw-usage" }
 iced = { version = "0.14", default-features = false }
 alacritty_terminal = "0.26"
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +23,10 @@ rfd = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+ureq = "3"
+jiff = "0.2"
+sha2 = "0.10"
+dbus-secret-service = "4"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

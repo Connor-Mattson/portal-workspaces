@@ -52,11 +52,29 @@ fn parse(bytes: &[u8]) -> Result<PersistedState, String> {
 }
 
 /// Upgrades an older document to [`SCHEMA_VERSION`]. Add one arm per version bump.
-pub fn migrate(value: Value) -> Result<Value, String> {
-    let version = value.get("schema_version").and_then(Value::as_u64).ok_or("missing schema_version")?;
-    match version {
-        v if v == u64::from(SCHEMA_VERSION) => Ok(value),
-        v => Err(format!("unsupported schema_version {v} (this build reads {SCHEMA_VERSION})")),
+pub fn migrate(mut value: Value) -> Result<Value, String> {
+    loop {
+        let version = value.get("schema_version").and_then(Value::as_u64).ok_or("missing schema_version")?;
+        match version {
+            v if v == u64::from(SCHEMA_VERSION) => return Ok(value),
+            // 1 → 2: usage profiles.
+            1 => {
+                let doc = value.as_object_mut().ok_or("state is not an object")?;
+                doc.insert("usage_profiles".into(), Value::Array(Vec::new()));
+                doc.insert("schema_version".into(), 2.into());
+            }
+            // 2 → 3: detached panes. `ui.terminal_window` defaults like every other `UiPrefs` field.
+            2 => {
+                let doc = value.as_object_mut().ok_or("state is not an object")?;
+                for ws in doc.get_mut("workspaces").and_then(Value::as_array_mut).into_iter().flatten() {
+                    ws.as_object_mut()
+                        .ok_or("workspace is not an object")?
+                        .insert("detached".into(), Value::Array(Vec::new()));
+                }
+                doc.insert("schema_version".into(), 3.into());
+            }
+            v => return Err(format!("unsupported schema_version {v} (this build reads {SCHEMA_VERSION})")),
+        }
     }
 }
 
@@ -92,6 +110,7 @@ pub fn save(path: &Path, state: &PersistedState) -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::layout::Preset;
+    use crate::usage::{Provider, UsageProfile};
     use crate::workspace::Workspace;
 
     fn sample() -> PersistedState {
@@ -136,6 +155,67 @@ mod tests {
         let LoadOutcome::Recovered { reason, backup } = outcome else { panic!("expected Recovered") };
         assert!(reason.contains("999"));
         assert!(backup.exists());
+    }
+
+    #[test]
+    fn version_1_files_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let v1 = r#"{"schema_version": 1, "workspaces": [], "active": null,
+            "ui": {"sidebar_collapsed": true, "font_size": 14.0, "window": null}}"#;
+        fs::write(&path, v1).unwrap();
+        let LoadOutcome::Loaded(state) = load(&path) else { panic!("expected Loaded") };
+        assert_eq!(state.schema_version, SCHEMA_VERSION);
+        assert!(state.usage_profiles.is_empty());
+        assert!(state.ui.sidebar_collapsed);
+        assert!(state.ui.usage_expanded);
+    }
+
+    #[test]
+    fn version_2_files_are_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let state = sample();
+        let mut v2 = serde_json::to_value(&state).unwrap();
+        v2["schema_version"] = 2.into();
+        for ws in v2["workspaces"].as_array_mut().unwrap() {
+            ws.as_object_mut().unwrap().remove("detached");
+        }
+        v2["ui"].as_object_mut().unwrap().remove("terminal_window");
+        fs::write(&path, serde_json::to_vec(&v2).unwrap()).unwrap();
+        let LoadOutcome::Loaded(loaded) = load(&path) else { panic!("expected Loaded") };
+        assert_eq!(loaded, state);
+    }
+
+    #[test]
+    fn detached_panes_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = sample();
+        let pane = crate::PaneId::new();
+        state.workspaces[0].detached.push(pane);
+        state.workspaces[0].panes.insert(pane, crate::PaneSpec { cwd: "/a/sub".into() });
+        state.ui.terminal_window = Some(crate::WindowGeometry { width: 800.0, height: 500.0 });
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path).into_state(), state);
+    }
+
+    #[test]
+    fn usage_profiles_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut state = sample();
+        state.usage_profiles = vec![
+            UsageProfile::new("Work", Provider::Claude, "alias claude-work='CLAUDE_CONFIG_DIR=~/.claude-work claude'"),
+            UsageProfile::new("Codex", Provider::Codex, ""),
+        ];
+        let duplicate = state.usage_profiles[0].clone();
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path).into_state().usage_profiles, state.usage_profiles);
+
+        state.usage_profiles.push(duplicate);
+        save(&path, &state).unwrap();
+        assert_eq!(load(&path).into_state().usage_profiles.len(), 2);
     }
 
     #[test]

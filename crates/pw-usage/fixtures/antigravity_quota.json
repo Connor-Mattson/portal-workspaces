@@ -1,0 +1,18 @@
+{
+  "groups": [
+    {
+      "displayName": "Gemini models",
+      "buckets": [
+        { "bucketId": "gemini-5h", "remaining": { "remainingFraction": 0.9751016 }, "resetTime": "2026-09-30T23:10:00Z" },
+        { "bucketId": "gemini-weekly", "remaining": { "remainingFraction": 0.91 }, "resetTime": "2026-10-05T08:00:00Z" }
+      ]
+    },
+    {
+      "displayName": "Partner models",
+      "buckets": [
+        { "bucketId": "3p-5h", "remaining": { "remainingFraction": 1 }, "resetTime": "2026-10-01T00:00:00Z" },
+        { "bucketId": "3p-weekly", "remaining": {}, "resetTime": "2026-10-03T08:00:00Z" }
+      ]
+    }
+  ]
+}

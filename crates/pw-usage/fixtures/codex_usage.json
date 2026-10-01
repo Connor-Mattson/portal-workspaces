@@ -1,0 +1,56 @@
+{
+  "plan_type": "education",
+  "rate_limit": {
+    "allowed": true,
+    "limit_reached": false,
+    "primary_window": {
+      "used_percent": 12,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 9000,
+      "reset_at": 1790830437
+    },
+    "secondary_window": {
+      "used_percent": 3,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 489006,
+      "reset_at": 1791310442
+    }
+  },
+  "code_review_rate_limit": null,
+  "additional_rate_limits": null,
+  "model_usage": {},
+  "chatpass": {
+    "windows": [
+      {
+        "used_percent": 0,
+        "limit_window_seconds": 604800,
+        "reset_after_seconds": 604800,
+        "reset_at": 1791426237
+      },
+      {
+        "used_percent": 0,
+        "limit_window_seconds": 18000,
+        "reset_after_seconds": 18000,
+        "reset_at": 1790839437
+      }
+    ]
+  },
+  "credits": {
+    "has_credits": true,
+    "unlimited": false,
+    "overage_limit_reached": false,
+    "balance": null,
+    "approx_local_messages": null,
+    "approx_cloud_messages": null
+  },
+  "spend_control": {
+    "reached": false,
+    "individual_limit": null
+  },
+  "rate_limit_reached_type": null,
+  "promo": null,
+  "rate_limit_reset_credits": {
+    "available_count": 0,
+    "applicable_available_count": 0
+  }
+}

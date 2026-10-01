@@ -28,6 +28,8 @@ pub enum Action {
     ClosePane,
     Focus(Direction),
     ToggleMaximize,
+    /// Moves the focused terminal into its own window, or docks the detached one back.
+    ToggleDetach,
     Copy,
     Paste,
     FontBigger,
@@ -73,6 +75,7 @@ pub fn action(key: &Key, m: Modifiers) -> Option<Action> {
             "d" => Some(Split(Axis::Vertical)),
             "e" => Some(Split(Axis::Horizontal)),
             "w" => Some(ClosePane),
+            "o" => Some(ToggleDetach),
             "c" => Some(Copy),
             "v" => Some(Paste),
             "=" | "+" => Some(FontBigger),
@@ -103,6 +106,7 @@ pub fn cheatsheet() -> Vec<(&'static str, String)> {
         ("Close terminal", format!("{m}W")),
         ("Move focus", format!("{m}Arrows")),
         ("Maximize terminal", format!("{m}Enter")),
+        ("Terminal in its own window / dock it", format!("{m}O")),
         ("Copy / paste", format!("{m}C  {m}V")),
         ("Font size", format!("{m}=  {m}-  {m}0")),
         ("Scroll history", "Shift+PgUp  Shift+PgDn".to_owned()),
@@ -172,6 +176,8 @@ mod tests {
         assert_eq!(action(&ch("n"), Modifiers::CTRL), None);
         assert_eq!(action(&ch("3"), app()), Some(Action::SelectWorkspace(2)));
         assert_eq!(action(&ch("d"), app()), Some(Action::Split(Axis::Vertical)));
+        assert_eq!(action(&ch("o"), app()), Some(Action::ToggleDetach));
+        assert_eq!(action(&ch("o"), Modifiers::CTRL), None);
     }
 
     #[test]

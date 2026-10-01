@@ -41,3 +41,7 @@ id_type!(
     /// Identifies a terminal pane. A running session is keyed by this id.
     PaneId
 );
+id_type!(
+    /// Identifies a tracked AI-usage profile (one account of one provider).
+    ProfileId
+);

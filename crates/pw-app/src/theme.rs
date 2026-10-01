@@ -312,6 +312,51 @@ pub fn scroller(_: &Theme, _status: scrollable::Status) -> scrollable::Style {
     }
 }
 
+// ---- usage meters ----------------------------------------------------------------------
+
+/// How full a limit is: the accent while there's room, amber from 70%, red from 90%.
+pub fn level_color(used: f32) -> Color {
+    if used >= 90.0 {
+        BAD
+    } else if used >= 70.0 {
+        WARN
+    } else {
+        ACCENT
+    }
+}
+
+/// `color` faded, for numbers that may be out of date.
+pub fn faded(color: Color, stale: bool) -> Color {
+    if stale { Color { a: color.a * 0.4, ..color } } else { color }
+}
+
+/// The empty part of a meter.
+pub fn meter_track(_: &Theme) -> container::Style {
+    container::Style {
+        background: Some(SURFACE_3.into()),
+        border: border(Color::TRANSPARENT, 0.0, 999.0),
+        ..Default::default()
+    }
+}
+
+pub fn meter_fill(color: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(color.into()),
+        border: border(color, 0.0, 999.0),
+        ..Default::default()
+    }
+}
+
+/// The mark showing how much of a window's time has passed.
+pub fn pace_tick(_: &Theme) -> container::Style {
+    container::Style { background: Some(Color { a: 0.75, ..FG_2 }.into()), ..Default::default() }
+}
+
+/// One tracked account in the drawer.
+pub fn usage_card(_: &Theme) -> container::Style {
+    container::Style { background: Some(SURFACE_2.into()), border: border(LINE, 1.0, R_MD), ..Default::default() }
+}
+
 pub fn to_color(rgb: pw_term::Rgb) -> Color {
     Color::from_rgb8(rgb.r, rgb.g, rgb.b)
 }

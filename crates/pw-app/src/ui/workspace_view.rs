@@ -11,7 +11,7 @@ use crate::icons;
 use crate::keymap::Action;
 use crate::theme;
 use crate::ui::terminal::TerminalCanvas;
-use crate::ui::{icon_button, preset_glyph, tildify, tip_for};
+use crate::ui::{icon_button, pane_label, preset_glyph, tildify, tip_for};
 use crate::workspace::WorkspaceView;
 
 const TITLE_HEIGHT: f32 = 28.0;
@@ -33,10 +33,19 @@ fn header<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
     let current = ws.matching_preset();
     let presets = row(Preset::ALL.into_iter().map(|preset| {
         let active = current == Some(preset);
-        let chip = button(preset_glyph(preset, if active { theme::ACCENT } else { theme::FG_3 }))
+        // With terminals detached, the bigger layouts would go over the cap.
+        let fits = ws.fits(preset);
+        let color = if active {
+            theme::ACCENT
+        } else if fits {
+            theme::FG_3
+        } else {
+            theme::LINE_STRONG
+        };
+        let chip = button(preset_glyph(preset, color))
             .padding([5, 7])
             .style(theme::chip(active))
-            .on_press(Message::ApplyPreset(preset));
+            .on_press_maybe(fits.then_some(Message::ApplyPreset(preset)));
         tip_for(chip.into(), preset_tip(preset))
     }))
     .spacing(theme::S1);
@@ -60,7 +69,7 @@ fn header<'a>(ws: &'a WorkspaceView) -> Element<'a, Message> {
             if ws.maximized().is_some() { &icons::MINIMIZE } else { &icons::MAXIMIZE },
             16.0,
             if ws.maximized().is_some() { "Restore layout" } else { "Maximize terminal" },
-            focused.filter(|_| ws.pane_count() > 1).map(Message::MaximizePane),
+            focused.filter(|_| ws.grid_len() > 1).map(Message::MaximizePane),
         ),
         icon_button(&icons::PENCIL, 15.0, "Edit workspace", Some(Message::EditWorkspace(ws.id()))),
     ]
@@ -125,7 +134,7 @@ fn grid<'a>(app: &'a App, ws: &'a WorkspaceView) -> Element<'a, Message> {
         );
     };
     let panes = PaneGrid::new(state, |_, &pane, maximized| {
-        let focused = ws.focused == Some(pane);
+        let focused = app.has_focus(pane);
         pane_grid::Content::new(body(app, pane, focused))
             .title_bar(title_bar(app, ws, pane, focused, maximized))
             .style(theme::pane(focused))
@@ -146,28 +155,6 @@ fn title_bar<'a>(
     focused: bool,
     maximized: bool,
 ) -> pane_grid::TitleBar<'a, Message> {
-    let rt = app.sessions.get(pane);
-    let cwd = rt.map(|rt| tildify(&rt.cwd)).unwrap_or_default();
-    let exited = rt.is_some_and(|rt| rt.exited.is_some() || rt.session.is_none());
-    let label = rt.and_then(|rt| rt.title.clone()).unwrap_or_else(|| cwd.clone());
-
-    let status = container(Space::new().width(6).height(6)).style(theme::badge(if exited {
-        theme::WARN
-    } else if focused {
-        theme::ACCENT
-    } else {
-        theme::LINE_STRONG
-    }));
-
-    let mut title = row![status, text(label).size(theme::T_SM).font(fonts::UI_MEDIUM).wrapping(text::Wrapping::None)]
-        .spacing(theme::S2)
-        .align_y(Alignment::Center);
-    // Shells usually put the cwd in the title already; only add it when they don't.
-    if rt.is_some_and(|rt| rt.title.as_ref().is_some_and(|t| !t.contains(cwd.as_str()))) {
-        title =
-            title.push(text(cwd).size(theme::T_XS).font(fonts::UI).color(theme::FG_3).wrapping(text::Wrapping::None));
-    }
-
     let can_split = ws.can_split();
     let controls = row![
         icon_button(
@@ -186,20 +173,49 @@ fn title_bar<'a>(
             if maximized { &icons::MINIMIZE } else { &icons::MAXIMIZE },
             13.0,
             if maximized { "Restore" } else { "Maximize" },
-            (ws.pane_count() > 1).then_some(Message::MaximizePane(pane)),
+            (ws.grid_len() > 1).then_some(Message::MaximizePane(pane)),
         ),
+        icon_button(&icons::POP_OUT, 13.0, "Open in its own window", Some(Message::DetachPane(pane))),
         icon_button(&icons::CLOSE, 13.0, "Close terminal", Some(Message::ClosePane(pane))),
     ]
     .spacing(0)
     .align_y(Alignment::Center);
 
-    pane_grid::TitleBar::new(container(title).height(TITLE_HEIGHT - 6.0).align_y(Alignment::Center).clip(true))
-        .controls(pane_grid::Controls::new(controls))
-        .padding(Padding::from([3.0, theme::S2]).left(theme::S3))
-        .style(theme::pane_title(focused))
+    pane_grid::TitleBar::new(
+        container(pane_title(app, pane, focused)).height(TITLE_HEIGHT - 6.0).align_y(Alignment::Center).clip(true),
+    )
+    .controls(pane_grid::Controls::new(controls))
+    .padding(Padding::from([3.0, theme::S2]).left(theme::S3))
+    .style(theme::pane_title(focused))
 }
 
-fn body<'a>(app: &'a App, pane: PaneId, focused: bool) -> Element<'a, Message> {
+/// A terminal's status dot, its label and (when the label doesn't show it) its cwd.
+pub fn pane_title<'a>(app: &'a App, pane: PaneId, focused: bool) -> Element<'a, Message> {
+    let rt = app.sessions.get(pane);
+    let cwd = rt.map(|rt| tildify(&rt.cwd)).unwrap_or_default();
+    let exited = rt.is_some_and(|rt| rt.exited.is_some() || rt.session.is_none());
+    let label = rt.map(pane_label).unwrap_or_default();
+
+    let status = container(Space::new().width(6).height(6)).style(theme::badge(if exited {
+        theme::WARN
+    } else if focused {
+        theme::ACCENT
+    } else {
+        theme::LINE_STRONG
+    }));
+
+    let mut title = row![status, text(label).size(theme::T_SM).font(fonts::UI_MEDIUM).wrapping(text::Wrapping::None)]
+        .spacing(theme::S2)
+        .align_y(Alignment::Center);
+    // Shells usually put the cwd in the title already; only add it when they don't.
+    if rt.is_some_and(|rt| rt.title.as_ref().is_some_and(|t| !t.contains(cwd.as_str()))) {
+        title =
+            title.push(text(cwd).size(theme::T_XS).font(fonts::UI).color(theme::FG_3).wrapping(text::Wrapping::None));
+    }
+    title.into()
+}
+
+pub fn body<'a>(app: &'a App, pane: PaneId, focused: bool) -> Element<'a, Message> {
     let Some(rt) = app.sessions.get(pane) else {
         return center(text("Starting…").size(theme::T_SM).color(theme::FG_3)).into();
     };

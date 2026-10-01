@@ -10,7 +10,10 @@ pub struct WorkspaceView {
     pub model: Workspace,
     /// The live layout. `None` when every pane has been closed.
     pub grid: Option<pane_grid::State<PaneId>>,
+    /// A pane in the grid.
     pub focused: Option<PaneId>,
+    /// Panes popped out into their own windows. They're not in the grid but count toward the cap.
+    pub detached: Vec<PaneId>,
     /// Shells are started the first time the workspace is shown, not at app launch.
     pub spawned: bool,
 }
@@ -18,23 +21,46 @@ pub struct WorkspaceView {
 impl WorkspaceView {
     pub fn new(model: Workspace) -> Self {
         let grid = model.layout.as_ref().map(|l| pane_grid::State::with_configuration(to_configuration(l)));
-        Self { focused: model.focused, grid, model, spawned: false }
+        Self { focused: model.focused, detached: model.detached.clone(), grid, model, spawned: false }
     }
 
     pub fn id(&self) -> pw_model::WorkspaceId {
         self.model.id
     }
 
+    /// The grid's panes in reading order.
     pub fn pane_ids(&self) -> Vec<PaneId> {
         self.layout().map(|l| l.panes()).unwrap_or_default()
     }
 
-    pub fn pane_count(&self) -> usize {
+    /// The grid's panes, then the detached ones.
+    pub fn all_pane_ids(&self) -> Vec<PaneId> {
+        let mut ids = self.pane_ids();
+        ids.extend(&self.detached);
+        ids
+    }
+
+    /// Panes in the grid.
+    pub fn grid_len(&self) -> usize {
         self.grid.as_ref().map_or(0, pane_grid::State::len)
+    }
+
+    /// Every terminal of the workspace, detached ones included.
+    pub fn pane_count(&self) -> usize {
+        self.grid_len() + self.detached.len()
     }
 
     pub fn can_split(&self) -> bool {
         self.pane_count() < MAX_PANES
+    }
+
+    /// Whether `preset` can be applied: it replaces the grid, and the detached panes stay.
+    pub fn fits(&self, preset: Preset) -> bool {
+        preset.pane_count() + self.detached.len() <= MAX_PANES
+    }
+
+    pub fn is_detached(&self, id: PaneId) -> bool {
+        self.detached.contains(&id)
     }
 
     /// The pane-grid handle for a pane id.
@@ -85,8 +111,31 @@ impl WorkspaceView {
         }
     }
 
-    /// Replaces the layout with `preset`, reusing existing panes in reading order. Returns the
-    /// ids of panes that were created (need shells) and dropped (need closing).
+    /// Takes a pane out of the grid to show in its own window. Focus moves to its sibling.
+    pub fn detach(&mut self, id: PaneId) -> bool {
+        if self.handle(id).is_none() {
+            return false;
+        }
+        // The others would stay hidden behind a pane that's gone.
+        if let Some(grid) = self.grid.as_mut() {
+            grid.restore();
+        }
+        self.close(id);
+        self.detached.push(id);
+        true
+    }
+
+    /// Puts a detached pane back into the grid, next to the focused pane, and focuses it.
+    pub fn dock(&mut self, id: PaneId) -> bool {
+        let Some(index) = self.detached.iter().position(|p| *p == id) else { return false };
+        self.detached.remove(index);
+        self.split(None, Axis::Vertical, id).expect("a detached pane already counted toward the cap");
+        true
+    }
+
+    /// Replaces the grid's layout with `preset`, reusing existing panes in reading order. Returns the
+    /// ids of panes that were created (need shells) and dropped (need closing). Detached panes stay;
+    /// callers check [`Self::fits`] first.
     pub fn apply_preset(&mut self, preset: Preset) -> (Vec<PaneId>, Vec<PaneId>) {
         let current = self.pane_ids();
         let want = preset.pane_count().min(MAX_PANES);
@@ -140,8 +189,9 @@ impl WorkspaceView {
         let mut model = self.model.clone();
         model.layout = self.layout();
         model.focused = self.focused;
+        model.detached = self.detached.clone();
         model.panes = self
-            .pane_ids()
+            .all_pane_ids()
             .into_iter()
             .map(|id| {
                 let cwd = cwd_of(id)
@@ -249,6 +299,46 @@ mod tests {
         assert!(created.is_empty());
         assert_eq!(dropped.len(), 3);
         assert_eq!(ws.pane_ids(), vec![before[0]]);
+    }
+
+    #[test]
+    fn detached_panes_count_toward_the_cap_and_dock_back() {
+        let mut ws = view(Preset::Grid { cols: 4, rows: 2 });
+        let ids = ws.pane_ids();
+        ws.focused = Some(ids[1]);
+        ws.toggle_maximize(ids[1]);
+        assert!(ws.detach(ids[1]));
+        assert_eq!(ws.maximized(), None);
+        assert_eq!(ws.grid_len(), MAX_PANES - 1);
+        assert_eq!(ws.pane_count(), MAX_PANES);
+        assert!(!ws.can_split());
+        assert!(!ws.fits(Preset::Grid { cols: 4, rows: 2 }));
+        assert!(ws.fits(Preset::Columns(4)));
+        assert_ne!(ws.focused, Some(ids[1]));
+        assert!(!ws.detach(ids[1]), "already detached");
+
+        let model = ws.to_model(|_| None);
+        assert_eq!(model.detached, vec![ids[1]]);
+        assert!(model.panes.contains_key(&ids[1]));
+        assert_eq!(model.clone().repaired(), model);
+
+        assert!(ws.dock(ids[1]));
+        assert!(ws.detached.is_empty());
+        assert_eq!(ws.grid_len(), MAX_PANES);
+        assert_eq!(ws.focused, Some(ids[1]));
+    }
+
+    #[test]
+    fn detaching_the_last_pane_empties_the_grid() {
+        let mut ws = view(Preset::Single);
+        let only = ws.focused.unwrap();
+        assert!(ws.detach(only));
+        assert_eq!(ws.grid_len(), 0);
+        assert_eq!(ws.all_pane_ids(), vec![only]);
+        let (created, dropped) = ws.apply_preset(Preset::Columns(2));
+        assert_eq!((created.len(), dropped.len()), (2, 0));
+        assert!(ws.dock(only));
+        assert_eq!(ws.pane_count(), 3);
     }
 
     #[test]
