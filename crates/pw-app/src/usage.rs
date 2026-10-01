@@ -24,6 +24,10 @@ pub struct ProfileStatus {
     pub next_poll: Option<SystemTime>,
     /// A poll was asked for and hasn't answered yet.
     pub checking: bool,
+    /// The user asked the CLI to renew an expired sign-in, and the answer hasn't come back.
+    pub renewing: bool,
+    /// The last renewal the user asked for left the sign-in expired.
+    pub renew_failed: bool,
 }
 
 pub struct Usage {
@@ -64,6 +68,8 @@ impl Usage {
     pub fn apply(&mut self, update: Update) {
         // A reading for a profile deleted while it was being polled.
         let Some(status) = self.statuses.get_mut(&update.profile) else { return };
+        let renewed = std::mem::take(&mut status.renewing);
+        status.renew_failed = renewed && matches!(update.result, Err(Failure::Idle { .. }));
         match update.result {
             Ok(report) => {
                 status.last = Some(report);
@@ -110,5 +116,16 @@ impl Usage {
             status.checking |= !recent;
         }
         self.monitor.refresh(None);
+    }
+
+    /// Has the profile's CLI renew its expired sign-in now, in the background, then polls it.
+    pub fn renew(&mut self, id: ProfileId) {
+        let Some(status) = self.statuses.get_mut(&id) else { return };
+        if status.renewing {
+            return;
+        }
+        status.renewing = true;
+        status.checking = true;
+        self.monitor.renew(id);
     }
 }

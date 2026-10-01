@@ -1,8 +1,8 @@
 //! Claude subscriptions: the usage endpoint Claude Code's `/usage` reads, with the account's own
 //! sign-in.
 //!
-//! Credentials are read, never written. When the access token has expired, `claude auth status`
-//! (run with the profile's environment) lets Claude Code renew it the way it always does.
+//! Credentials are read, never written. When the access token has expired, `claude doctor` (run
+//! with the profile's environment) lets Claude Code renew it the way it always does.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -77,7 +77,7 @@ fn fetch(http: &Http, creds: &Credentials) -> Result<crate::http::Response, Fail
 }
 
 fn renew(env: &PollEnv) {
-    if let Err(err) = vendor::run(VendorCmd::ClaudeAuthStatus, env) {
+    if let Err(err) = vendor::run(VendorCmd::ClaudeDoctor, env) {
         tracing::info!(%err, dir = %env.dir.display(), "claude couldn't renew its sign-in");
     }
 }

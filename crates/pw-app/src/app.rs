@@ -65,6 +65,8 @@ pub enum Message {
     /// A reading from the usage monitor.
     Usage(pw_usage::Update),
     RefreshUsage,
+    /// Asks an idle profile's CLI to renew its expired sign-in.
+    RenewProfile(ProfileId),
     AddProfile,
     EditProfile(ProfileId),
     ToggleUsage,
@@ -468,6 +470,7 @@ impl App {
             Message::Paste(None) => {}
             Message::Usage(update) => self.usage.apply(update),
             Message::RefreshUsage => self.usage.refresh(),
+            Message::RenewProfile(id) => self.usage.renew(id),
             Message::AddProfile => {
                 self.modal = Some(Modal::Profile(ProfileEditor::new(self.usage.profiles())));
                 return profile_editor::focus();

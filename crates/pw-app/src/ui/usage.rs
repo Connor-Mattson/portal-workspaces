@@ -125,12 +125,19 @@ fn card<'a>(app: &'a App, profile: &'a UsageProfile) -> Element<'a, Message> {
                 body = body.push(meter_row(window, now, stale));
             }
         }
+        // An expired sign-in gets the renew row below instead.
+        (None, Some(Failure::Idle { .. })) => {}
         (None, Some(failure)) => {
             body = body.push(text(failure.to_string()).size(theme::T_XS).font(fonts::UI).color(failure_color(failure)));
         }
         (None, None) => {
             body = body.push(skeleton_row(Span::FiveHour)).push(skeleton_row(Span::Weekly));
         }
+    }
+    if let Some(status) = status
+        && let Some(Failure::Idle { hint }) = &status.failure
+    {
+        body = body.push(renew_row(profile, status, hint));
     }
 
     let card = container(body).padding([8, 10]).width(Fill).style(theme::usage_card);
@@ -145,6 +152,31 @@ fn card<'a>(app: &'a App, profile: &'a UsageProfile) -> Element<'a, Message> {
     let controls = container(container(edit).style(theme::keycap)).align_right(Fill).padding([5, 6]);
 
     tooltip(hover(card, controls), details(profile, status, now), tooltip::Position::Right).gap(10).into()
+}
+
+/// "Sign-in expired" with a button that has the CLI renew it in the background, so you don't have
+/// to go run it yourself. Only if that doesn't work does it ask you to.
+fn renew_row<'a>(profile: &UsageProfile, status: &ProfileStatus, hint: &str) -> Element<'a, Message> {
+    let note = match (status.renewing, status.renew_failed) {
+        (true, _) => "Renewing sign-in…".to_owned(),
+        (false, true) => format!("Still expired. Run {hint} once to sign in."),
+        (false, false) => "Sign-in expired.".to_owned(),
+    };
+    let renew = button(
+        row![
+            svg(icons::REFRESH.clone()).width(11).height(11).style(theme::icon_hover(theme::FG_3, theme::FG)),
+            text(if status.renew_failed { "Retry" } else { "Renew" }).size(theme::T_XS).font(fonts::UI_MEDIUM),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding([2, 6])
+    .style(theme::ghost_button)
+    .on_press_maybe((!status.renewing).then_some(Message::RenewProfile(profile.id)));
+    row![text(note).size(theme::T_XS).font(fonts::UI).color(theme::WARN).width(Fill), renew]
+        .spacing(theme::S2)
+        .align_y(Alignment::Center)
+        .into()
 }
 
 /// Scoped windows that haven't been touched (no usage, no window open) are left out, so a

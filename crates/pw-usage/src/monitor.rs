@@ -32,6 +32,7 @@ pub struct Update {
 enum Command {
     SetProfiles(Vec<UsageProfile>),
     Refresh(Option<ProfileId>),
+    Renew(ProfileId),
 }
 
 pub struct Monitor {
@@ -57,6 +58,12 @@ impl Monitor {
     /// Polls one profile (or all of them) now, unless they were polled moments ago.
     pub fn refresh(&self, profile: Option<ProfileId>) {
         let _ = self.tx.send(Command::Refresh(profile));
+    }
+
+    /// Polls a profile now and lets its CLI renew an expired sign-in even if it tried moments ago
+    /// (a click on an idle card, not the schedule).
+    pub fn renew(&self, profile: ProfileId) {
+        let _ = self.tx.send(Command::Renew(profile));
     }
 }
 
@@ -84,6 +91,12 @@ fn run(poller: &impl Poller, rx: &mpsc::Receiver<Command>, on_update: &(impl Fn(
                     if slot.last_poll.is_none_or(|t| now.duration_since(t) >= MIN_REFRESH_GAP) {
                         slot.due = now;
                     }
+                }
+            }
+            Ok(Command::Renew(target)) => {
+                if let Some(slot) = slots.iter_mut().find(|s| s.profile.id == target) {
+                    slot.state.allow_renewal();
+                    slot.due = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -219,6 +232,11 @@ mod tests {
         monitor.refresh(None);
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
         assert_eq!(asked.lock().unwrap().len(), 2);
+
+        // A renewal is the user asking for one profile in particular, so it goes through.
+        monitor.renew(a.id);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), a.id);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
 
         drop(monitor);
     }

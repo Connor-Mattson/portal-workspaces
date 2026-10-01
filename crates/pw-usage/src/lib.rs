@@ -53,6 +53,11 @@ impl ProviderState {
         self.last_renewal = Some(now);
         true
     }
+
+    /// Lifts the throttle, so the next poll may renew right away.
+    pub(crate) fn allow_renewal(&mut self) {
+        self.last_renewal = None;
+    }
 }
 
 /// The real providers: Claude, Codex and Antigravity.
@@ -109,6 +114,8 @@ mod tests {
         let mut state = ProviderState::default();
         assert!(state.may_renew());
         assert!(!state.may_renew());
+        state.allow_renewal();
+        assert!(state.may_renew());
     }
 
     #[test]

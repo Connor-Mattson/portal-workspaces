@@ -15,8 +15,9 @@ use pw_model::PollEnv;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VendorCmd {
-    /// `claude auth status --json`: reports the signed-in account; renews an expired token.
-    ClaudeAuthStatus,
+    /// `claude doctor`: checks the install and fetches remote settings, which renews an expired
+    /// token. (`claude auth status` only reads the stored sign-in, so it never renews it.)
+    ClaudeDoctor,
     /// `agy models`: lists models (an authenticated metadata call); renews an expired token.
     AgyModels,
     /// `codex app-server`, asked over stdin for the signed-in account with `refreshToken`: Codex
@@ -40,7 +41,7 @@ const CODEX_ACCOUNT_READ: &str = concat!(
 impl VendorCmd {
     fn program(self) -> &'static str {
         match self {
-            VendorCmd::ClaudeAuthStatus => "claude",
+            VendorCmd::ClaudeDoctor => "claude",
             VendorCmd::AgyModels => "agy",
             VendorCmd::CodexAccountRead => "codex",
         }
@@ -48,7 +49,7 @@ impl VendorCmd {
 
     fn args(self) -> &'static [&'static str] {
         match self {
-            VendorCmd::ClaudeAuthStatus => &["auth", "status", "--json"],
+            VendorCmd::ClaudeDoctor => &["doctor"],
             VendorCmd::AgyModels => &["models"],
             VendorCmd::CodexAccountRead => &["app-server"],
         }
@@ -58,7 +59,7 @@ impl VendorCmd {
     fn script(self) -> Option<(&'static str, u64)> {
         match self {
             VendorCmd::CodexAccountRead => Some((CODEX_ACCOUNT_READ, 2)),
-            VendorCmd::ClaudeAuthStatus | VendorCmd::AgyModels => None,
+            VendorCmd::ClaudeDoctor | VendorCmd::AgyModels => None,
         }
     }
 }
@@ -70,7 +71,13 @@ pub fn run(cmd: VendorCmd, env: &PollEnv) -> Result<String, String> {
     let program =
         which(cmd.program()).ok_or_else(|| format!("`{}` isn't installed (or not on PATH).", cmd.program()))?;
     let script = cmd.script();
-    let mut child = Command::new(&program)
+    let mut command = Command::new(&program);
+    // `claude doctor` reads the settings files in its working directory, so don't let it pick up
+    // whatever project the app happened to be started from.
+    if env.dir.is_dir() {
+        command.current_dir(&env.dir);
+    }
+    let mut child = command
         .args(cmd.args())
         .envs(env.vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .stdin(if script.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -150,7 +157,7 @@ mod tests {
 
     #[test]
     fn commands_never_prompt_a_model() {
-        for cmd in [VendorCmd::ClaudeAuthStatus, VendorCmd::AgyModels, VendorCmd::CodexAccountRead] {
+        for cmd in [VendorCmd::ClaudeDoctor, VendorCmd::AgyModels, VendorCmd::CodexAccountRead] {
             let args = cmd.args();
             for flag in ["-p", "--print", "--prompt", "exec", "-i", "--prompt-interactive", "-c", "--continue"] {
                 assert!(!args.contains(&flag), "{cmd:?} must not run a model");

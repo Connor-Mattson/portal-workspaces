@@ -80,8 +80,9 @@ Antigravity are detected automatically. For another setup, paste the alias you s
   so usage from your other machines counts too. No model is ever run. Codex signed in with an API key falls
   back to the limits the CLI recorded after its last turn here.
 - Sign-ins are only read. When one has expired, the app asks the CLI itself to renew it without running a
-  model (`claude auth status`, `agy models`, or Codex's app server). If that doesn't renew it, the card says
-  **idle** until you next use that CLI.
+  model (`claude doctor`, `agy models`, or Codex's app server). If that doesn't renew it, the card says
+  **idle** and has a **Renew** button that tries again right away. If that doesn't work either, run the CLI once
+  yourself.
 
 ## Where state lives
 

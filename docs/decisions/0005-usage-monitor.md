@@ -39,7 +39,7 @@ and all of them should be visible at a glance in the drawer. None of the provide
       `antigravity-quota (portal-workspaces/x.y)`.
 - **No tokens, enforced by construction:**
   - Every URL is a variant of `http::Endpoint`, and there are no free-form URLs.
-  - Every subprocess is a variant of `vendor::VendorCmd`: `claude auth status --json`, `agy models` and
+  - Every subprocess is a variant of `vendor::VendorCmd`: `claude doctor`, `agy models` and
     `codex app-server`. Each is an authenticated metadata call that runs no model. `codex app-server` is fed
     a fixed script on stdin (`initialize`, then `account/read` with `refreshToken`), and the test pins its
     methods to exactly those.
@@ -49,8 +49,13 @@ and all of them should be visible at a glance in the drawer. None of the provide
     Codex, one side would hold a dead token, and that session would be signed out.
   - Running the CLI's token-free command lets it renew under its own locking. This is throttled to once per
     15 min per profile.
+  - For Claude that command is `claude doctor`, which fetches remote settings and so renews the token.
+    `claude auth status` looked like the natural choice, but it only reads the stored sign-in and never
+    renews it (checked against Claude Code 2.1.286). Don't switch back to it.
   - If the token is still expired after that, the profile shows **idle**. Its usage can't change while nobody
     uses the account.
+  - An idle card has a **Renew** button. It runs the same command right away (skipping the 15-minute
+    throttle) and polls again. Only if that fails does the card ask you to run the CLI yourself.
   - Credentials are only ever read.
 
 ## Consequences
