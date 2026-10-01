@@ -46,7 +46,7 @@ pub struct Palette {
 }
 
 impl Default for Palette {
-    /// Tuned to Science Portal's dark tokens (`--term-bg`, `--term-fg`, `--accent`).
+    /// Tuned to Portal Compute's dark tokens (`--term-bg`, `--term-fg`, `--accent`).
     fn default() -> Self {
         Self {
             foreground: Rgb::hex(0xd6dbe4),

@@ -3,7 +3,7 @@
 **Every project, its terminals, one keystroke away.**
 
 Portal Workspaces is a native desktop app for Linux and macOS for running many projects at once, each with
-its own CLI agents (Claude Code, Codex, …). It's a companion to [Science Portal](../science-portal).
+its own CLI agents (Claude Code, Codex, …). It's a companion to [Portal Compute](../portal-compute).
 
 - **Workspaces** live in a drawer on the left. Each one is a project folder with its own layout of
   **1–8 terminals**.

@@ -127,7 +127,7 @@ cargo build --release -p pw-app && ./scripts/install.sh    # install for the cur
   - `persist.rs`: state path + background `Saver`. `logging.rs`: the size-bounded log file next to it, and the
     panic hook (ADR 0017).
   - `keymap.rs`: shortcuts + iced key → terminal key.
-  - `theme.rs`: design tokens (ported from Science Portal's dark theme) + widget styles.
+  - `theme.rs`: design tokens (ported from Portal Compute's dark theme) + widget styles.
   - `fonts.rs`: bundled Inter + JetBrains Mono NL; `CellMetrics`.
   - `icons.rs`: inline SVG icons.
   - `ui/`: `sidebar.rs`, `workspace_view.rs` (header + pane grid), `terminal.rs` (canvas renderer + mouse),

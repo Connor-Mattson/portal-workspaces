@@ -1,6 +1,6 @@
 //! Design tokens and widget styles.
 //!
-//! The colors are Science Portal's dark tokens (`../science-portal/web/src/styles/tokens.css`),
+//! The colors are Portal Compute's dark tokens (`../portal-compute/web/src/styles/tokens.css`),
 //! so the two apps read as one family. One accent is used for focus, selection and the primary
 //! action. Status colors are for status only.
 
